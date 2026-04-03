@@ -31,3 +31,8 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
+
+test_env
+
+CLAUDE.md
+MEMORY.md

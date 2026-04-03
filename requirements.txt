@@ -1,0 +1,51 @@
+# =============================================================================
+# CouchHire — Python Dependencies (pinned)
+# Install: pip install -r requirements.txt
+# =============================================================================
+
+# --- Core Orchestration ------------------------------------------------------
+langgraph>=0.2.0                # Multi-agent graph orchestration
+langchain-core>=0.3.0           # Required by LangGraph for base types
+
+# --- LLM Abstraction --------------------------------------------------------
+litellm>=1.50.0                 # Unified LLM API (Groq / Gemini / Anthropic / OpenAI)
+
+# --- NLP & ML ---------------------------------------------------------------
+spacy>=3.7.0                    # NER for skill extraction
+sentence-transformers>=2.7.0    # ATS match scoring (0xnbk/nbk-ats-semantic-v1-en)
+torch>=2.0.0                    # Required by sentence-transformers
+scikit-learn>=1.4.0             # Cosine similarity, metrics for retrain loop
+
+# --- Vector Store ------------------------------------------------------------
+chromadb>=0.5.0                 # Local vector store for master CV sections
+
+# --- Database ----------------------------------------------------------------
+supabase>=2.7.0                 # Supabase Python client (PostgreSQL)
+
+# --- Gmail MCP Client -------------------------------------------------------
+mcp>=1.0.0                      # MCP Python SDK (client for Gmail MCP server)
+httpx>=0.27.0                   # HTTP client (required by MCP streamable-http transport)
+
+# --- Telegram Bot ------------------------------------------------------------
+python-telegram-bot>=21.0       # Async Telegram bot (notifications + /outcome)
+
+# --- Browser Automation ------------------------------------------------------
+playwright>=1.44.0              # ATS form filling via Chromium
+
+# --- Dashboard ---------------------------------------------------------------
+streamlit>=1.37.0               # Application tracking dashboard
+
+# --- PDF / LaTeX -------------------------------------------------------------
+# pdflatex is a system binary (texlive-latex-full), not a pip package.
+# Install via: apt-get install texlive-latex-full (or Docker — see Dockerfile)
+
+# --- Config & Utilities ------------------------------------------------------
+python-dotenv>=1.0.0            # .env file loading
+pathlib2>=2.3.7;python_version<"3.12"  # pathlib backport (only if needed)
+
+# --- Testing -----------------------------------------------------------------
+pytest>=8.2.0                   # Test runner
+pytest-cov>=5.0.0               # Coverage reporting
+
+# --- Logging / Dev -----------------------------------------------------------
+rich>=13.7.0                    # Pretty logging and console output (optional but nice)
