@@ -1,0 +1,79 @@
+\documentclass[11pt,a4paper]{article}
+
+% ─── Packages ───
+\usepackage[margin=0.6in]{geometry}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{fontenc}
+
+% ─── Formatting ───
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\titleformat{\section}{\large\bfseries\uppercase}{}{0em}{}[\titlerule]
+\titlespacing*{\section}{0pt}{10pt}{6pt}
+\setlist[itemize]{nosep, left=0pt, label=\textbullet, itemsep=2pt}
+
+% ─── Document ───
+\begin{document}
+
+% ──────────────────────────────────────────────
+%%INJECT:HEADER%%
+% ──────────────────────────────────────────────
+\begin{center}
+    {\LARGE\bfseries Jane Doe} \\[4pt]
+    \href{mailto:jane@example.com}{jane@example.com} \quad
+    \href{https://github.com/janedoe}{github.com/janedoe} \quad
+    San Francisco, CA
+\end{center}
+
+% ──────────────────────────────────────────────
+\section{Education}
+%%INJECT:EDUCATION%%
+% ──────────────────────────────────────────────
+\textbf{B.S. Computer Science} \hfill University of Example, 2024 \\
+GPA: 3.8/4.0. Relevant coursework: Machine Learning, Distributed Systems, Algorithms.
+
+% ──────────────────────────────────────────────
+\section{Experience}
+%%INJECT:EXPERIENCE%%
+% ──────────────────────────────────────────────
+\textbf{Software Engineer Intern} \hfill Acme Corp \hfill Jun 2023 -- Aug 2023
+\begin{itemize}
+    \item Built REST APIs serving 10k requests/day using Python and FastAPI
+    \item Reduced query latency by 40\% by adding Redis caching layer
+    \item Wrote integration tests covering 95\% of critical paths
+\end{itemize}
+
+% ──────────────────────────────────────────────
+\section{Projects}
+%%INJECT:PROJECTS%%
+% ──────────────────────────────────────────────
+\textbf{Portfolio Optimizer} \hfill Python, pandas, PyTorch
+\begin{itemize}
+    \item LSTM model for stock price prediction with 12\% lower RMSE than baseline
+    \item Backtesting engine processing 5 years of daily data in under 10 seconds
+\end{itemize}
+
+\textbf{Chat Application} \hfill Go, WebSocket, Redis
+\begin{itemize}
+    \item Real-time messaging system supporting 500 concurrent connections
+    \item Deployed on AWS ECS with auto-scaling and CloudWatch monitoring
+\end{itemize}
+
+% ──────────────────────────────────────────────
+\section{Skills}
+%%INJECT:SKILLS%%
+% ──────────────────────────────────────────────
+\textbf{Languages:} Python, Go, SQL, JavaScript \\
+\textbf{Frameworks:} FastAPI, React, PyTorch, pandas \\
+\textbf{Tools:} Docker, AWS, PostgreSQL, Redis, Git
+
+% ──────────────────────────────────────────────
+\section{Publications}
+%%INJECT:PUBLICATIONS%%
+% ──────────────────────────────────────────────
+% No publications — this section will be removed if empty after injection.
+
+\end{document}
