@@ -76,6 +76,11 @@ MATCH_THRESHOLD: int = int(_raw_threshold) if _raw_threshold is not None else 60
 # Not needed at runtime. See .env.example for format details.
 SUPABASE_DB_URL: str | None = _env("SUPABASE_DB_URL")
 
+# Supabase Management API token — used ONLY by db/create_tables.py as
+# a fallback when direct Postgres connection fails.
+# Generate at: https://supabase.com/dashboard/account/tokens
+SUPABASE_ACCESS_TOKEN: str | None = _env("SUPABASE_ACCESS_TOKEN")
+
 # ---------------------------------------------------------------------------
 # Validation — runs on import
 # ---------------------------------------------------------------------------

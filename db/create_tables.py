@@ -19,22 +19,23 @@ Usage:
 import os
 import sys
 from pathlib import Path
-from urllib.parse import urlparse, quote_plus, urlunparse
+from urllib.parse import urlparse, quote_plus, unquote, urlunparse
 
 # Ensure project root is on sys.path so we can import config
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from config import SUPABASE_URL
+from config import SUPABASE_URL, SUPABASE_ACCESS_TOKEN
 
 
 def _read_schema() -> str:
-    """Read the SQL schema file."""
+    """Read the SQL schema file, prepended with DROP TABLE for a clean slate."""
     schema_path = _PROJECT_ROOT / "db" / "schema.sql"
     if not schema_path.exists():
         print(f"ERROR: Schema file not found at {schema_path}")
         sys.exit(1)
-    return schema_path.read_text(encoding="utf-8")
+    drop_stmt = "DROP TABLE IF EXISTS public.applications CASCADE;\n\n"
+    return drop_stmt + schema_path.read_text(encoding="utf-8")
 
 
 def _extract_project_ref(supabase_url: str) -> str:
@@ -55,11 +56,14 @@ def _sanitize_db_url(db_url: str) -> str:
 
     Handles passwords containing special characters like @, #, %, etc.
     that would otherwise break URL parsing.
+    urlparse returns percent-encoded values, so we must decode first
+    to get the real password, then re-encode for safe URL construction.
     """
     parsed = urlparse(db_url)
     if parsed.password:
-        # Re-encode the password to handle special chars (@ in particular)
-        encoded_password = quote_plus(parsed.password)
+        # Decode first (urlparse keeps %40 as-is), then re-encode
+        real_password = unquote(parsed.password)
+        encoded_password = quote_plus(real_password)
         # Rebuild the netloc: user:encoded_password@host:port
         if parsed.port:
             netloc = f"{parsed.username}:{encoded_password}@{parsed.hostname}:{parsed.port}"
@@ -107,8 +111,7 @@ def _try_direct_postgres(sql: str) -> bool:
 
 def _try_management_api(sql: str) -> bool:
     """Attempt to execute SQL via Supabase Management API."""
-    access_token = os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip()
-    if not access_token:
+    if not SUPABASE_ACCESS_TOKEN:
         return False
 
     try:
@@ -130,9 +133,9 @@ def _try_management_api(sql: str) -> bool:
     try:
         response = httpx.post(
             url,
-            content=sql,
+            json={"query": sql},
             headers={
-                "Authorization": f"Bearer {access_token}",
+                "Authorization": f"Bearer {SUPABASE_ACCESS_TOKEN}",
                 "Content-Type": "application/json",
             },
             timeout=30.0,

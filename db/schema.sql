@@ -121,6 +121,8 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Use DROP + CREATE to make the script idempotent
+DROP TRIGGER IF EXISTS trg_applications_updated_at ON applications;
 CREATE TRIGGER trg_applications_updated_at
     BEFORE UPDATE ON applications
     FOR EACH ROW
@@ -135,6 +137,7 @@ ALTER TABLE applications ENABLE ROW LEVEL SECURITY;
 
 -- Allow all operations for authenticated and anon users (single-user app).
 -- Tighten this if you add multi-user support later.
+DROP POLICY IF EXISTS "Allow all access for anon" ON applications;
 CREATE POLICY "Allow all access for anon"
     ON applications
     FOR ALL
