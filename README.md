@@ -582,11 +582,11 @@ Available at http://localhost:8501 once running.
 - [ ] Gmail MCP integration
 - [ ] Playwright form filling
 - [ ] Manual takeover session handoff
-- [ ] Supabase logging
+- [x] Supabase logging
 - [ ] Streamlit dashboard
 - [ ] NLP match scorer + retraining loop
 - [ ] Indeed MCP job pulls
-- [ ] LiteLLM multi-provider support
+- [x] LiteLLM multi-provider support
 - [ ] Docker support
 - [ ] Open source release
 
