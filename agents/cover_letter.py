@@ -90,10 +90,12 @@ EXTEND its narrative — explain the impact, the story behind it, what it demons
 Connect it to the role's required skills: {skills_str}.
 Do NOT re-list the tech stack or bullet points from the resume.
 The resume covers what was built. The cover letter covers why it mattered and what it demonstrates about the candidate.
+Write in clear, concise sentences. Maximum 2 clauses per sentence.
+Do not chain sentences with 'and'. Each sentence should stand alone.
 
 Paragraph 3 — Close.
-Express availability and enthusiasm. Include a brief call to action.
-Keep it natural — one or two sentences.
+Paragraph 3 must be 2-3 short sentences. End with a clean call to action as its own sentence.
+Express availability and enthusiasm naturally.
 
 RULES:
 - Output ONLY the 3 paragraphs as plain text
