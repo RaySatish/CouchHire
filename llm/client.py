@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # to hit.  Keep these in sync with the providers listed in config.py.
 _PROVIDER_MODEL_MAP: dict[str, str] = {
     "groq": "groq/llama-3.3-70b-versatile",
-    "gemini": "gemini/gemini-2.0-flash",
+    "gemini": "gemini/gemini-3.1-flash-lite-preview",
     "anthropic": "anthropic/claude-sonnet-4-20250514",
     "openai": "openai/gpt-4o",
 }

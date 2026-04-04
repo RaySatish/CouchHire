@@ -210,8 +210,88 @@ def _clean_latex_content(content: str) -> str:
     return content.strip()
 
 
+# Regex to detect missing .sty packages in pdflatex output
+_MISSING_PKG_PATTERN = re.compile(
+    r"! LaTeX Error: File `(?P<package>[^']+)\.sty' not found\.",
+)
+
+
+def _install_missing_packages(missing: list[str]) -> bool:
+    """Attempt to install missing LaTeX packages via tlmgr.
+
+    Returns True if installation succeeded, False otherwise.
+    """
+    logger.warning(
+        "Missing LaTeX packages detected: %s — installing via tlmgr",
+        ", ".join(missing),
+    )
+
+    tlmgr = shutil.which("tlmgr")
+    if tlmgr is None:
+        logger.error("tlmgr not found on PATH — cannot auto-install packages")
+        return False
+
+    cmd = ["sudo", tlmgr, "install"] + missing
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode == 0:
+            logger.info("Packages installed successfully: %s", ", ".join(missing))
+            return True
+        else:
+            logger.error(
+                "tlmgr install failed (exit code %d).\nSTDOUT: %s\nSTDERR: %s",
+                result.returncode,
+                result.stdout[-500:] if result.stdout else "(empty)",
+                result.stderr[-500:] if result.stderr else "(empty)",
+            )
+            return False
+    except subprocess.TimeoutExpired:
+        logger.error("tlmgr install timed out after 300 seconds")
+        return False
+    except OSError as exc:
+        logger.error("Failed to run tlmgr: %s", exc)
+        return False
+
+
+def _run_pdflatex(cmd: list[str], tex_name: str) -> str:
+    """Run pdflatex twice (for cross-refs) and return the last stdout.
+
+    Logs warnings on non-zero exit codes but does not raise — the caller
+    checks for the PDF file to determine success.
+    """
+    last_stdout = ""
+    for run_num in (1, 2):
+        logger.info("pdflatex run %d/2: %s", run_num, tex_name)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        last_stdout = result.stdout or ""
+
+        if result.returncode != 0:
+            logger.warning(
+                "pdflatex run %d exited with code %d (may be non-fatal).\n"
+                "--- STDOUT (last 1500 chars) ---\n%s\n--- STDERR ---\n%s",
+                run_num,
+                result.returncode,
+                last_stdout[-1500:] if last_stdout else "(empty)",
+                result.stderr[-500:] if result.stderr else "(empty)",
+            )
+    return last_stdout
+
+
 def _compile_pdf(tex_path: Path) -> Path:
     """Compile a .tex file to PDF using pdflatex (run twice for cross-refs).
+
+    If pdflatex fails due to missing .sty packages, attempts to auto-install
+    them via tlmgr and retries compilation.
 
     Args:
         tex_path: Absolute path to the .tex file.
@@ -220,7 +300,8 @@ def _compile_pdf(tex_path: Path) -> Path:
         Absolute path to the compiled .pdf file.
 
     Raises:
-        RuntimeError: If pdflatex is not found or compilation fails.
+        RuntimeError: If pdflatex is not found, compilation fails, or
+                      auto-install of missing packages fails.
     """
     pdflatex = shutil.which("pdflatex")
     if pdflatex is None:
@@ -239,39 +320,46 @@ def _compile_pdf(tex_path: Path) -> Path:
         str(tex_path),
     ]
 
-    # Run twice — standard practice to resolve cross-references.
-    # pdflatex in nonstopmode often returns non-zero for warnings (e.g.
-    # "There's no line here to end") yet still produces a valid PDF.
-    # We log warnings but only raise if no PDF is produced.
-    last_stdout = ""
-    for run_num in (1, 2):
-        logger.info("pdflatex run %d/2: %s", run_num, tex_path.name)
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        last_stdout = result.stdout or ""
-
-        if result.returncode != 0:
-            logger.warning(
-                "pdflatex run %d exited with code %d (may be non-fatal).\n"
-                "--- STDOUT (last 1500 chars) ---\n%s\n--- STDERR ---\n%s",
-                run_num,
-                result.returncode,
-                last_stdout[-1500:] if last_stdout else "(empty)",
-                result.stderr[-500:] if result.stderr else "(empty)",
-            )
+    # First compilation attempt
+    last_stdout = _run_pdflatex(cmd, tex_path.name)
 
     pdf_path = tex_path.with_suffix(".pdf")
+
+    # If PDF was not produced, check for missing packages
     if not pdf_path.exists():
-        raise RuntimeError(
-            f"pdflatex failed to produce a PDF. "
-            f"Debug the .tex file at: {tex_path}\n"
-            f"pdflatex output (last 2000 chars):\n"
-            f"{last_stdout[-2000:] if last_stdout else '(empty)'}"
+        missing = list(
+            {m.group("package") for m in _MISSING_PKG_PATTERN.finditer(last_stdout)}
         )
+
+        if missing:
+            # Attempt auto-install and retry
+            if _install_missing_packages(missing):
+                logger.info("Retrying pdflatex after installing packages...")
+                last_stdout = _run_pdflatex(cmd, tex_path.name)
+
+                if not pdf_path.exists():
+                    raise RuntimeError(
+                        f"pdflatex still failed after installing packages: "
+                        f"{', '.join(missing)}\n"
+                        f"Debug the .tex file at: {tex_path}\n"
+                        f"pdflatex output (last 2000 chars):\n"
+                        f"{last_stdout[-2000:] if last_stdout else '(empty)'}"
+                    )
+            else:
+                raise RuntimeError(
+                    f"Missing LaTeX packages: {', '.join(missing)}\n"
+                    f"Auto-install failed. Run manually:\n"
+                    f"  sudo tlmgr install {' '.join(missing)}\n"
+                    f"Then re-run the pipeline."
+                )
+        else:
+            # No missing packages — generic compilation failure
+            raise RuntimeError(
+                f"pdflatex failed to produce a PDF. "
+                f"Debug the .tex file at: {tex_path}\n"
+                f"pdflatex output (last 2000 chars):\n"
+                f"{last_stdout[-2000:] if last_stdout else '(empty)'}"
+            )
 
     # Clean up auxiliary files
     for ext in (".aux", ".log", ".out"):
@@ -282,6 +370,10 @@ def _compile_pdf(tex_path: Path) -> Path:
 
     logger.info("PDF compiled: %s", pdf_path)
     return pdf_path
+
+
+
+
 
 
 def tailor(cv_sections: list[str], requirements: dict) -> tuple[str, str]:

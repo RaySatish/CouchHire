@@ -294,6 +294,8 @@ sudo apt-get install texlive-full
 pdflatex --version
 ```
 
+> **💡 Auto-install:** CouchHire automatically installs missing LaTeX packages via `tlmgr` when compiling your resume template. This requires `tlmgr` to be available (included with TeX Live). If auto-install fails due to permissions, run the suggested `sudo tlmgr install ...` command manually.
+
 **Playwright browsers** — installed after pip dependencies, see Installation step 4.
 
 **A Telegram account** — to create your bot and get your chat ID.
