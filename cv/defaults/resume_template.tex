@@ -1,3 +1,7 @@
+%% CouchHire Default Resume Template
+%% Single-column, clean, professional layout
+%% resume_tailor.py replaces %%INJECT:<SECTION>%% markers with tailored content
+
 \documentclass[11pt,a4paper]{article}
 
 % ─── Packages ───
@@ -6,74 +10,75 @@
 \usepackage{titlesec}
 \usepackage{hyperref}
 \usepackage{xcolor}
-\usepackage{fontenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
 
 % ─── Formatting ───
 \pagestyle{empty}
 \setlength{\parindent}{0pt}
-\titleformat{\section}{\large\bfseries\uppercase}{}{0em}{}[\titlerule]
-\titlespacing*{\section}{0pt}{10pt}{6pt}
-\setlist[itemize]{nosep, left=0pt, label=\textbullet, itemsep=2pt}
+\setlength{\parskip}{2pt}
 
-% ─── Document ───
+\titleformat{\section}{\large\bfseries\uppercase}{}{0em}{}[\titlerule]
+\titlespacing*{\section}{0pt}{8pt}{4pt}
+
+\setlist[itemize]{nosep, leftmargin=1.5em, label=\textbullet}
+
+\hypersetup{colorlinks=true, urlcolor=blue!70!black}
+
+% ═══════════════════════════════════════════════════════
 \begin{document}
 
-% ──────────────────────────────────────────────
+% ─── Header ───
 %%INJECT:HEADER%%
-% ──────────────────────────────────────────────
-\begin{center}
-    {\LARGE\bfseries Jane Doe} \\[4pt]
-    \href{mailto:jane@example.com}{jane@example.com} \quad
-    \href{https://github.com/janedoe}{github.com/janedoe} \quad
-    San Francisco, CA
-\end{center}
+{\centering
+  {\LARGE\bfseries Jane Doe} \\[4pt]
+  \href{mailto:jane@example.com}{jane@example.com}
+  \enspace|\enspace +1-555-000-0000
+  \enspace|\enspace \href{https://github.com/janedoe}{github.com/janedoe}
+  \enspace|\enspace San Francisco, CA \\
+\par}
+\vspace{6pt}
+%%END:HEADER%%
 
-% ──────────────────────────────────────────────
+% ─── Education ───
 \section{Education}
 %%INJECT:EDUCATION%%
-% ──────────────────────────────────────────────
-\textbf{B.S. Computer Science} \hfill University of Example, 2024 \\
-GPA: 3.8/4.0. Relevant coursework: Machine Learning, Distributed Systems, Algorithms.
+\textbf{B.S. Computer Science} \hfill 2020 -- 2024 \\
+Example University \hfill GPA: 3.8/4.0
+%%END:EDUCATION%%
 
-% ──────────────────────────────────────────────
+% ─── Experience ───
 \section{Experience}
 %%INJECT:EXPERIENCE%%
-% ──────────────────────────────────────────────
-\textbf{Software Engineer Intern} \hfill Acme Corp \hfill Jun 2023 -- Aug 2023
+\textbf{Software Engineer Intern} \hfill Summer 2023 \\
+\textit{Acme Corp} \hfill San Francisco, CA
 \begin{itemize}
-    \item Built REST APIs serving 10k requests/day using Python and FastAPI
-    \item Reduced query latency by 40\% by adding Redis caching layer
-    \item Wrote integration tests covering 95\% of critical paths
+  \item Built REST APIs serving 10k requests/day using Python and FastAPI
+  \item Reduced query latency by 40\% through PostgreSQL index optimization
 \end{itemize}
+%%END:EXPERIENCE%%
 
-% ──────────────────────────────────────────────
+% ─── Projects ───
 \section{Projects}
 %%INJECT:PROJECTS%%
-% ──────────────────────────────────────────────
-\textbf{Portfolio Optimizer} \hfill Python, pandas, PyTorch
+\textbf{Portfolio Optimizer} \hfill \href{https://github.com/janedoe/portfolio-opt}{GitHub}
 \begin{itemize}
-    \item LSTM model for stock price prediction with 12\% lower RMSE than baseline
-    \item Backtesting engine processing 5 years of daily data in under 10 seconds
+  \item LSTM model for stock price prediction trained on 5 years of daily data
+  \item Achieved 12\% annualized return improvement in backtesting
+  \item Stack: Python, pandas, PyTorch, FastAPI
 \end{itemize}
+%%END:PROJECTS%%
 
-\textbf{Chat Application} \hfill Go, WebSocket, Redis
-\begin{itemize}
-    \item Real-time messaging system supporting 500 concurrent connections
-    \item Deployed on AWS ECS with auto-scaling and CloudWatch monitoring
-\end{itemize}
-
-% ──────────────────────────────────────────────
+% ─── Skills ───
 \section{Skills}
 %%INJECT:SKILLS%%
-% ──────────────────────────────────────────────
-\textbf{Languages:} Python, Go, SQL, JavaScript \\
-\textbf{Frameworks:} FastAPI, React, PyTorch, pandas \\
-\textbf{Tools:} Docker, AWS, PostgreSQL, Redis, Git
+\textbf{Languages:} Python, SQL, C++, JavaScript \\
+\textbf{Frameworks:} FastAPI, PyTorch, React \\
+\textbf{Tools:} Docker, AWS, PostgreSQL, Git
+%%END:SKILLS%%
 
-% ──────────────────────────────────────────────
-\section{Publications}
+% ─── Publications ───
 %%INJECT:PUBLICATIONS%%
-% ──────────────────────────────────────────────
-% No publications — this section will be removed if empty after injection.
+%%END:PUBLICATIONS%%
 
 \end{document}

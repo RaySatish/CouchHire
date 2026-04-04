@@ -89,15 +89,22 @@ couchhire/
 ├── llm/
 │   └── client.py             # LiteLLM wrapper — all LLM calls go through here
 ├── cv/
-│   ├── master_cv.tex         # Your master CV in LaTeX — never committed to git
-│   ├── master_cv.template.tex # Template showing expected structure — committed to git
-│   ├── embed_cv.py           # Chunks master_cv.tex by section and loads into ChromaDB
-│   └── chroma_store/         # Local ChromaDB embeddings — never committed to git
+│   ├── uploads/              # User's personal files — gitignored
+│   │   ├── master_cv.*       # .tex, .pdf, or .docx — any format accepted
+│   │   ├── resume_template.tex  # Optional custom LaTeX template
+│   │   └── instructions.md   # Optional tailoring preferences
+│   ├── chroma_store/         # ChromaDB embeddings — gitignored
+│   ├── output/               # Compiled PDFs — gitignored
+│   ├── embed_cv.py           # Orchestrates parse → embed pipeline
+│   ├── cv_parser.py          # Parses .tex/.pdf/.docx into named sections
+│   └── defaults/             # Fallback template and instructions — committed
+│       ├── resume_template.tex
+│       └── instructions.md
 ├── pipeline.py               # LangGraph orchestrator — main entry point
 ├── config.py                 # Reads .env, validates all keys on startup, exposes config
 ├── .env                      # Your secrets — never committed to git
 ├── .env.example              # Template with all variable names — committed to git
-├── .gitignore                # Excludes .env, master_cv.tex, chroma_store/, compiled PDFs
+├── .gitignore                # Excludes .env, cv/uploads/, cv/chroma_store/, cv/output/, compiled PDFs
 ├── docker-compose.yml        # One-command alternative to manual setup
 ├── Dockerfile                # Container definition for the main app
 ├── requirements.txt          # Pinned Python dependencies
@@ -137,9 +144,10 @@ This section is intentionally precise so that each module has a clear contract. 
 - **If score < threshold:** pipeline sets `state["skip"] = True` and halts
 
 ### `agents/resume_tailor.py`
-- **Input:** `cv_sections`, `requirements`
-- **Output:** `resume_pdf_path` (str) — absolute path to compiled PDF
-- **Process:** reads `cv/master_cv.tex`, rewrites sections, compiles via `pdflatex`
+
+- **Reads:** `state["cv_sections"]`, `state["requirements"]`
+- **Also retrieves from ChromaDB:** resume template (`type=template`), tailoring instructions (`type=instructions`)
+- **Process:** injects tailored content into template's `%%INJECT:<SECTION>%%` markers, compiles via `pdflatex`
 - **Intermediate file:** `cv/output/tailored_<timestamp>.tex` (gitignored)
 
 ### `agents/cover_letter.py`
@@ -468,19 +476,45 @@ applications (
 
 ## CV Setup
 
-Your master CV is the source of truth for every tailored resume. It is never committed to the repository.
+CouchHire accepts your master CV in any format — LaTeX, PDF, or Word.
 
-### Step 1 — Create your master CV
-```bash
-cp cv/master_cv.template.tex cv/master_cv.tex
-```
-Open `cv/master_cv.tex` and fill it in. The template has comments showing what each section should contain and how the RAG agent chunks it. Keep the section header comments intact — they are used as chunk boundaries.
+### Step 1 — Place your files in cv/uploads/
 
-### Step 2 — Embed your CV into ChromaDB
+| File | Required | Description |
+|---|---|---|
+| `master_cv.tex` / `master_cv.pdf` / `master_cv.docx` | Yes | Your full master CV |
+| `resume_template.tex` | No | Your preferred LaTeX resume layout |
+| `instructions.md` | No | Your tailoring preferences |
+
+If you do not provide a template or instructions, CouchHire uses its own defaults automatically.
+
+#### Tailoring instructions examples
+
+Add plain English preferences to `cv/uploads/instructions.md`:
+
+- "Always keep to 1 page"
+- "Lead with projects for ML roles, lead with experience for quant roles"
+- "Never include GPA"
+- "Use a two-column skills section"
+
+### Step 2 — Embed your CV
+
 ```bash
 python cv/embed_cv.py
 ```
-This reads `cv/master_cv.tex`, splits it by section, generates embeddings, and stores them in `cv/chroma_store/`. Re-run this command any time you update your master CV.
+
+This parses your CV into sections, embeds each section using sentence-transformers, and stores everything in ChromaDB locally. Re-run this command any time you update your CV or template.
+
+### Step 3 — Verify
+
+```bash
+python -c "
+import chromadb
+client = chromadb.PersistentClient(path='cv/chroma_store')
+col = client.get_collection('master_cv')
+print(f'Chunks embedded: {col.count()}')
+"
+```
 
 ---
 
@@ -602,7 +636,7 @@ Available at http://localhost:8501 once running.
 
 For bugs, open an issue with the error message, your OS, Python version, and which LLM provider you are using.
 
-**Never commit your `.env` file, `cv/master_cv.tex`, or the `cv/chroma_store/` directory.**
+**Never commit your `.env` file, `cv/uploads/` directory, or the `cv/chroma_store/` directory.**
 
 ---
 

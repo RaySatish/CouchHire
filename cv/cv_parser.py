@@ -1,35 +1,35 @@
-"""Parses an uploaded master CV into named sections regardless of input format.
-
-Supported formats: .tex (LaTeX), .pdf (via pdfplumber), .docx (via python-docx).
 """
+cv/cv_parser.py — Parses uploaded master CV into named sections.
+
+Supports .tex, .pdf, and .docx input formats (auto-detected by extension).
+Returns a dict mapping section names to section text.
+"""
+
 import logging
 import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Common resume section names — used for PDF/DOCX heuristic splitting
-_SECTION_NAMES = {
-    "education", "experience", "work experience", "professional experience",
-    "projects", "skills", "technical skills", "publications", "research",
-    "certifications", "awards", "honors", "summary", "objective",
-    "interests", "activities", "extracurricular", "volunteer",
-    "references", "languages", "courses", "coursework",
+# Common resume section names used for boundary detection in PDF/DOCX
+_COMMON_SECTIONS = {
+    "education", "experience", "work experience", "employment",
+    "projects", "skills", "technical skills", "publications",
+    "certifications", "awards", "summary", "objective",
+    "professional experience", "research", "interests",
+    "achievements", "activities", "volunteer", "references",
+    "header", "contact", "about", "profile",
 }
 
 
 def parse_cv(cv_path: Path) -> dict[str, str]:
-    """Parse a CV file into named sections.
-
-    Returns a dict mapping section names to their text content.
-    Raises ValueError if the file format is unsupported.
-    """
+    """Parse a CV file into named sections. Returns {section_name: section_text}."""
     cv_path = Path(cv_path)
+
     if not cv_path.exists():
         raise FileNotFoundError(f"CV file not found: {cv_path}")
 
     suffix = cv_path.suffix.lower()
-    logger.info("Parsing CV: %s (format: %s)", cv_path.name, suffix)
 
     if suffix == ".tex":
         return _parse_tex(cv_path)
@@ -39,8 +39,8 @@ def parse_cv(cv_path: Path) -> dict[str, str]:
         return _parse_docx(cv_path)
     else:
         raise ValueError(
-            f"Unsupported CV format: {suffix}. "
-            "Supported formats: .tex, .pdf, .docx"
+            f"Unsupported CV format: '{suffix}'. "
+            f"Supported formats: .tex, .pdf, .docx"
         )
 
 
@@ -49,62 +49,188 @@ def _parse_tex(cv_path: Path) -> dict[str, str]:
     text = cv_path.read_text(encoding="utf-8")
     sections: dict[str, str] = {}
 
-    # Pattern 1: explicit markers  %--- SECTION: <NAME> ---
-    explicit_pattern = re.compile(r"^%---\s*SECTION:\s*(.+?)\s*---", re.MULTILINE)
-    # Pattern 2: \section{} or \subsection{}
-    latex_pattern = re.compile(r"\\(?:section|subsection)\{([^}]+)\}", re.MULTILINE)
+    # Pattern 1: Explicit markers  %--- SECTION: <NAME> ---
+    marker_pattern = re.compile(r"%---\s*SECTION:\s*(.+?)\s*---")
+    # Pattern 2: LaTeX section commands  \section{Name} or \subsection{Name}
+    latex_pattern = re.compile(r"\\(?:sub)?section\*?\{([^}]+)\}")
 
-    # Collect all split points with their positions
-    markers: list[tuple[int, str]] = []
+    # Combine both patterns — find all section boundaries
+    boundaries: list[tuple[int, str]] = []
 
-    for m in explicit_pattern.finditer(text):
-        markers.append((m.start(), m.group(1).strip()))
-    for m in latex_pattern.finditer(text):
-        markers.append((m.start(), m.group(1).strip()))
+    for match in marker_pattern.finditer(text):
+        boundaries.append((match.start(), match.group(1).strip()))
 
-    if not markers:
-        logger.warning(
-            "No section markers found in %s — returning full text as one section",
-            cv_path.name,
-        )
-        return {"Full CV": text.strip()}
+    for match in latex_pattern.finditer(text):
+        boundaries.append((match.end(), match.group(1).strip()))
 
-    # Sort by position
-    markers.sort(key=lambda x: x[0])
+    if not boundaries:
+        logger.warning("No section boundaries found in %s — returning full text", cv_path)
+        return {"full_document": text.strip()}
 
-    for i, (pos, name) in enumerate(markers):
-        end = markers[i + 1][0] if i + 1 < len(markers) else len(text)
-        chunk = text[pos:end]
+    # Sort by position in file
+    boundaries.sort(key=lambda x: x[0])
 
-        # Strip the marker line itself from the chunk
-        first_newline = chunk.find("\n")
-        if first_newline != -1:
-            chunk = chunk[first_newline:].strip()
+    for i, (pos, name) in enumerate(boundaries):
+        if i + 1 < len(boundaries):
+            end_pos = boundaries[i + 1][0]
+            # For the next boundary, find the start of that line to avoid
+            # including the next section command in this section's text
+            line_start = text.rfind("\n", 0, end_pos)
+            if line_start == -1:
+                line_start = end_pos
+            content = text[pos:line_start]
         else:
-            chunk = chunk.strip()
+            content = text[pos:]
 
-        # Remove LaTeX noise but keep content readable
-        chunk = _clean_latex(chunk)
+        # Clean up: remove the section command itself from content start
+        # (for latex_pattern matches, pos is already after the command)
+        content = content.strip()
 
-        if chunk:
-            sections[name] = chunk
+        # Remove trailing \end{document} if present
+        content = re.sub(r"\\end\{document\}\s*$", "", content).strip()
 
-    logger.info("Parsed %d sections from LaTeX: %s", len(sections), list(sections.keys()))
+        if content:
+            sections[name] = content
+
+    logger.info("Parsed %d sections from LaTeX CV: %s", len(sections), list(sections.keys()))
     return sections
 
 
-def _clean_latex(text: str) -> str:
-    """Light cleanup of LaTeX — remove commands but keep text content."""
-    text = re.sub(r"\\(?:textbf|textit|emph|underline)\{([^}]*)\}", r"\1", text)
-    text = re.sub(r"\\(?:href)\{[^}]*\}\{([^}]*)\}", r"\1", text)
-    text = re.sub(r"\\(?:hfill|quad|qquad|\\\\|newline|vspace\{[^}]*\}|hspace\{[^}]*\})", " ", text)
-    text = re.sub(r"\\item\s*", "- ", text)
-    text = re.sub(r"\\begin\{[^}]*\}", "", text)
-    text = re.sub(r"\\end\{[^}]*\}", "", text)
-    text = re.sub(r"\\[a-zA-Z]+\{[^}]*\}", "", text)
-    text = re.sub(r"\\[a-zA-Z]+", "", text)
-    text = re.sub(r"[{}]", "", text)
-    text = re.sub(r"%.*$", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    return text.strip()
+def _parse_pdf(cv_path: Path) -> dict[str, str]:
+    """Parse a PDF CV by extracting text and splitting on section-like headings."""
+    try:
+        import pdfplumber
+    except ImportError as e:
+        raise ImportError(
+            "pdfplumber is required for PDF parsing. "
+            "Install it: pip install pdfplumber"
+        ) from e
+
+    pages_text: list[str] = []
+    with pdfplumber.open(cv_path) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if page_text:
+                pages_text.append(page_text)
+
+    if not pages_text:
+        logger.warning("No text extracted from PDF: %s", cv_path)
+        return {}
+
+    full_text = "\n".join(pages_text)
+    return _split_by_headings(full_text, cv_path)
+
+
+def _parse_docx(cv_path: Path) -> dict[str, str]:
+    """Parse a DOCX CV by Heading styles or ALL-CAPS line detection."""
+    try:
+        import docx
+    except ImportError as e:
+        raise ImportError(
+            "python-docx is required for DOCX parsing. "
+            "Install it: pip install python-docx"
+        ) from e
+
+    doc = docx.Document(cv_path)
+
+    # First try: use Heading styles as section boundaries
+    sections: dict[str, str] = {}
+    current_section: str | None = None
+    current_lines: list[str] = []
+
+    has_headings = any(
+        p.style.name.startswith("Heading") for p in doc.paragraphs
+    )
+
+    if has_headings:
+        for para in doc.paragraphs:
+            if para.style.name.startswith("Heading") and para.text.strip():
+                # Save previous section
+                if current_section is not None:
+                    sections[current_section] = "\n".join(current_lines).strip()
+                current_section = para.text.strip()
+                current_lines = []
+            else:
+                if para.text.strip():
+                    current_lines.append(para.text.strip())
+
+        if current_section is not None:
+            sections[current_section] = "\n".join(current_lines).strip()
+
+        # Remove empty sections
+        sections = {k: v for k, v in sections.items() if v}
+
+        if sections:
+            logger.info(
+                "Parsed %d sections from DOCX (Heading styles): %s",
+                len(sections), list(sections.keys()),
+            )
+            return sections
+
+    # Fallback: extract all text and split by headings
+    full_text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    return _split_by_headings(full_text, cv_path)
+
+
+def _split_by_headings(text: str, source_path: Path) -> dict[str, str]:
+    """Split plain text into sections using ALL-CAPS lines or known section names."""
+    lines = text.split("\n")
+    sections: dict[str, str] = {}
+    current_section: str | None = None
+    current_lines: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            current_lines.append("")
+            continue
+
+        if _is_section_heading(stripped):
+            # Save previous section
+            if current_section is not None:
+                sections[current_section] = "\n".join(current_lines).strip()
+            current_section = stripped.title()
+            current_lines = []
+        else:
+            current_lines.append(stripped)
+
+    # Save last section
+    if current_section is not None:
+        sections[current_section] = "\n".join(current_lines).strip()
+
+    # Remove empty sections
+    sections = {k: v for k, v in sections.items() if v}
+
+    if not sections:
+        logger.warning(
+            "No section headings detected in %s — returning full text",
+            source_path,
+        )
+        return {"full_document": text.strip()}
+
+    logger.info(
+        "Parsed %d sections from text: %s", len(sections), list(sections.keys()),
+    )
+    return sections
+
+
+def _is_section_heading(line: str) -> bool:
+    """Detect if a line is likely a section heading."""
+    # ALL-CAPS line with 2+ alpha chars and no more than 5 words
+    words = line.split()
+    if (
+        len(words) <= 5
+        and len(line) >= 2
+        and line.upper() == line
+        and any(c.isalpha() for c in line)
+        and not line.startswith("•")
+        and not line.startswith("-")
+    ):
+        return True
+
+    # Known section name (case-insensitive)
+    normalized = line.lower().rstrip(":").strip()
+    if normalized in _COMMON_SECTIONS:
+        return True
+
+    return False
