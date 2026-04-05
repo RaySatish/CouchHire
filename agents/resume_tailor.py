@@ -1,9 +1,18 @@
 """Tailor the master CV to a specific job description and compile to PDF.
 
-Retrieves the resume template and tailoring instructions from ChromaDB,
-uses the LLM to generate tailored LaTeX for each %%INJECT:<SECTION>%%
-marker, compiles the result with pdflatex, and returns the PDF path
-alongside a structured summary of what the resume emphasises.
+SELECT-ONLY approach: the LLM never generates LaTeX. It selects which
+content to include and in what order from the master CV. All output is
+assembled verbatim from master_cv.tex — zero hallucinated content.
+
+Pipeline:
+  1. Load template + instructions (uploads/ → defaults/ fallback)
+  2. Parse master_cv.tex → raw LaTeX sections
+  3. Build plain-text inventory → LLM selects content (JSON only)
+  4. Assemble verbatim LaTeX blocks based on LLM's selection
+  5. Inject into template %%INJECT:SECTION%% markers
+  6. Compile PDF with pdflatex
+  7. Page enforcement loop — trim lowest-priority projects until within limit
+  8. Generate resume_content summary for cover_letter.py
 """
 
 from __future__ import annotations
@@ -15,206 +24,374 @@ import subprocess
 import time
 from pathlib import Path
 
-from config import CHROMA_STORE_DIR
+from llm.client import complete
+from agents.resume_assembler import (
+    get_page_count as _get_page_count,
+    _fuzzy_find,
+    _fuzzy_find_in_template,
+    build_template_block_registry,
+    extract_style_examples,
+    detect_project_separator,
+    needs_reformatting,
+    reformat_to_template_style,
+)
 
 logger = logging.getLogger(__name__)
 
-_COLLECTION_NAME = "master_cv"
+# ── Paths ──────────────────────────────────────────────────────────────
+_CV_DIR = Path(__file__).resolve().parent.parent / "cv"
+_UPLOADS_DIR = _CV_DIR / "uploads"
+_DEFAULTS_DIR = _CV_DIR / "defaults"
+_OUTPUT_DIR = _CV_DIR / "output"
 
-# Regex to find %%INJECT:<SECTION>%% ... %%END:<SECTION>%% blocks
+# ── Regex ──────────────────────────────────────────────────────────────
+# Matches %%INJECT:SECTION%% ... %%END:SECTION%% blocks in the template
 _INJECT_PATTERN = re.compile(
     r"%%INJECT:(?P<section>[A-Z_]+)%%\n(?P<default>.*?)%%END:(?P=section)%%",
     re.DOTALL,
 )
 
-# ── Output directory ──────────────────────────────────────────────────────
-_CV_DIR = Path(__file__).resolve().parent.parent / "cv"
-_OUTPUT_DIR = _CV_DIR / "output"
-
-# ── Lazy ChromaDB singleton ──────────────────────────────────────────────
-_chroma_collection = None
-
-
-def _get_collection():
-    """Lazily initialise ChromaDB client and return the master_cv collection."""
-    global _chroma_collection
-    if _chroma_collection is None:
-        import chromadb
-
-        chroma_path = Path(CHROMA_STORE_DIR)
-        if not chroma_path.exists():
-            raise RuntimeError(
-                f"ChromaDB store not found at {chroma_path}. "
-                "Run 'python cv/embed_cv.py' first to embed your CV."
-            )
-
-        client = chromadb.PersistentClient(path=str(chroma_path))
-        _chroma_collection = client.get_collection(name=_COLLECTION_NAME)
-        logger.info(
-            "Connected to ChromaDB collection '%s' (%d documents)",
-            _COLLECTION_NAME,
-            _chroma_collection.count(),
-        )
-    return _chroma_collection
-
-
-def _retrieve_by_type(chunk_type: str) -> str:
-    """Retrieve a special chunk from ChromaDB by its type metadata.
-
-    Args:
-        chunk_type: 'template' or 'instructions'.
-
-    Returns:
-        The document text of the matching chunk.
-
-    Raises:
-        RuntimeError: If no chunk with the given type is found.
-    """
-    collection = _get_collection()
-
-    results = collection.get(
-        where={"type": chunk_type},
-        include=["documents"],
-    )
-
-    documents = results.get("documents", [])
-    if not documents:
-        raise RuntimeError(
-            f"No '{chunk_type}' chunk found in ChromaDB. "
-            "Run 'python cv/embed_cv.py' to re-embed your CV with "
-            "template and instructions."
-        )
-
-    logger.info("Retrieved '%s' chunk (%d chars)", chunk_type, len(documents[0]))
-    return documents[0]
-
-
-def _extract_sections(template: str) -> list[str]:
-    """Extract section names from %%INJECT:<SECTION>%% markers in the template.
-
-    Returns:
-        List of section names (e.g. ['HEADER', 'EDUCATION', 'EXPERIENCE', ...]).
-    """
-    sections = [m.group("section") for m in _INJECT_PATTERN.finditer(template)]
-    logger.info("Found %d injectable sections: %s", len(sections), sections)
-    return sections
-
-
-def _build_section_prompt(
-    section_name: str,
-    cv_sections: list[str],
-    requirements: dict,
-    instructions: str,
-    default_content: str,
-) -> str:
-    """Build the LLM prompt for generating tailored LaTeX for one section."""
-    role = requirements.get("role", "the role")
-    company = requirements.get("company", "the company")
-    skills = requirements.get("skills", [])
-
-    return f"""You are a professional resume writer generating LaTeX content for a tailored resume.
-
-TARGET ROLE: {role} at {company}
-KEY SKILLS REQUIRED: {', '.join(skills) if skills else 'Not specified'}
-
-TAILORING INSTRUCTIONS:
-{instructions}
-
-CANDIDATE'S CV DATA (relevant sections):
-{chr(10).join(cv_sections)}
-
-SECTION TO GENERATE: {section_name}
-
-DEFAULT TEMPLATE CONTENT FOR THIS SECTION (use as a formatting reference only — do NOT copy placeholder names or data):
-{default_content}
-
-RULES:
-- Output ONLY valid LaTeX content for the {section_name} section
-- NO markdown, NO code fences, NO commentary, NO explanations
-- Match the LaTeX formatting style of the default content (same commands, same structure)
-- Be factual, achievement-focused, and keyword-rich — the cover letter handles narrative
-- Quantify achievements wherever the CV data supports it
-- Prioritise skills and experience most relevant to {role} at {company}
-- Keep content concise — this resume must fit on 1 page total
-- Use the candidate's actual data from CV DATA above — never fabricate
-- If the CV data has no content for this section, output a minimal placeholder using the default structure
-
-Generate the LaTeX content for the {section_name} section now:"""
-
-
-def _build_resume_content_prompt(
-    sections_generated: dict[str, str],
-    cv_sections: list[str],
-    requirements: dict,
-    detailed: bool,
-) -> str:
-    """Build the LLM prompt for generating the structured resume_content summary."""
-    role = requirements.get("role", "the role")
-    company = requirements.get("company", "the company")
-
-    detail_instruction = (
-        "Be FULLY DETAILED — the cover letter agent will use this to complement the resume."
-        if detailed
-        else "Provide a brief summary — this will not be consumed downstream."
-    )
-
-    sections_text = "\n\n".join(
-        f"--- {name} ---\n{content}" for name, content in sections_generated.items()
-    )
-
-    return f"""Analyse the tailored resume content below and produce a structured summary.
-
-TARGET ROLE: {role} at {company}
-
-ORIGINAL CV DATA:
-{chr(10).join(cv_sections)}
-
-TAILORED RESUME SECTIONS:
-{sections_text}
-
-{detail_instruction}
-
-Output EXACTLY in this bullet-point format (no other text):
-- Led with: <project or experience name> (<key technologies>, <metric if any>)
-- Highlighted skills: <comma-separated list of skills emphasised>
-- Included: <other projects/experiences that were included>
-- Omitted: <what was left out from original CV and brief reason why>
-- Foregrounded: <what angle/domain was emphasised, e.g. quantitative finance>
-- Quantified achievements: <N> out of <total> bullets have metrics"""
-
-
-def _fill_template(template: str, section_contents: dict[str, str]) -> str:
-    """Replace %%INJECT:<SECTION>%% ... %%END:<SECTION>%% blocks with generated content."""
-
-    def _replacer(match: re.Match) -> str:
-        section_name = match.group("section")
-        if section_name in section_contents:
-            return section_contents[section_name]
-        # If we didn't generate content for this section, keep the default
-        return match.group("default")
-
-    filled = _INJECT_PATTERN.sub(_replacer, template)
-    return filled
-
-
-def _clean_latex_content(content: str) -> str:
-    """Post-process LLM-generated LaTeX to fix common issues.
-
-    - Strips leading bare \\ (line breaks with nothing before them)
-    - Removes completely empty lines that could cause paragraph breaks in bad spots
-    """
-    # Remove bare \\ at the very start (causes "There's no line here to end")
-    content = re.sub(r"^\s*\\\\\s*\n", "", content)
-    # Remove lines that are just \\ (bare line breaks with no content)
-    content = re.sub(r"\n\s*\\\\\s*\n", "\n", content)
-    return content.strip()
-
-
-# Regex to detect missing .sty packages in pdflatex output
+# Detects missing LaTeX packages from pdflatex output
 _MISSING_PKG_PATTERN = re.compile(
     r"! LaTeX Error: File `(?P<package>[^']+)\.sty' not found\.",
 )
 
+
+# ═══════════════════════════════════════════════════════════════════════
+# Step 1 — Load template and instructions from disk
+# ═══════════════════════════════════════════════════════════════════════
+
+def _load_template() -> str:
+    """Load resume template — uploads/ first, defaults/ fallback."""
+    uploads_path = _UPLOADS_DIR / "resume_template.tex"
+    defaults_path = _DEFAULTS_DIR / "resume_template.tex"
+
+    if uploads_path.exists():
+        logger.info("Using custom template: %s", uploads_path)
+        return uploads_path.read_text(encoding="utf-8")
+    elif defaults_path.exists():
+        logger.info("Using default template: %s", defaults_path)
+        return defaults_path.read_text(encoding="utf-8")
+    else:
+        raise FileNotFoundError(
+            "No resume template found. Place resume_template.tex in "
+            f"{_UPLOADS_DIR} or {_DEFAULTS_DIR}"
+        )
+
+
+def _load_instructions() -> str:
+    """Load tailoring instructions — uploads/ first, defaults/ fallback."""
+    uploads_path = _UPLOADS_DIR / "instructions.md"
+    defaults_path = _DEFAULTS_DIR / "instructions.md"
+
+    if uploads_path.exists():
+        logger.info("Using custom instructions: %s", uploads_path)
+        return uploads_path.read_text(encoding="utf-8")
+    elif defaults_path.exists():
+        logger.info("Using default instructions: %s", defaults_path)
+        return defaults_path.read_text(encoding="utf-8")
+    else:
+        logger.warning("No instructions file found — using empty instructions")
+        return ""
+
+
+def _parse_page_limit(instructions: str) -> int:
+    """Extract page limit from instructions text. Defaults to 1 if not found."""
+    # Match patterns like "1 page", "2 pages", "max 1 page", "Keep resume to 1 page"
+    match = re.search(
+        r"(?:keep\s+(?:resume\s+)?to\s+|max(?:imum)?\s+|limit\s+(?:to\s+)?)?(\d+)\s+page",
+        instructions,
+        re.IGNORECASE,
+    )
+    if match:
+        limit = int(match.group(1))
+        logger.info("Page limit from instructions: %d", limit)
+        return limit
+    logger.info("No page limit found in instructions — defaulting to 1")
+    return 1
+
+
+def _get_template_markers(template: str) -> list[str]:
+    """Return list of section marker names found in the template."""
+    return [m.group("section") for m in _INJECT_PATTERN.finditer(template)]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Step 4 — Assemble verbatim LaTeX from LLM's selection JSON
+# ═══════════════════════════════════════════════════════════════════════
+
+def _assemble_section_content(
+    marker: str,
+    selection: dict,
+    raw_sections: dict[str, str],
+    block_registry: dict[str, dict[str, str]],
+    template_blocks: dict[str, dict[str, str]] | None = None,
+    template_style_examples: dict[str, str] | None = None,
+    project_separator: str | None = None,
+) -> str:
+    """Assemble the LaTeX content for a single template marker.
+
+    Uses 3-tier content resolution:
+      TIER 1: Use template version verbatim (if item exists in template)
+      TIER 2: Reformat master_cv content to match template style (LLM call)
+      TIER 3: Use master_cv content as-is (if template has no examples)
+
+    Args:
+        marker: Template marker name (e.g. "PROJECTS", "EXPERIENCE").
+        selection: The LLM's selection JSON.
+        raw_sections: Parsed master_cv sections {name: raw_latex}.
+        block_registry: Named sub-blocks from master_cv per section
+                        {"PROJECTS": {"CouchHire": "<latex>", ...}, ...}.
+        template_blocks: Named sub-blocks from the template per section
+                         (parallel to block_registry). None if not available.
+        template_style_examples: Full style examples per marker from template
+                                 %%INJECT%% blocks. Used for reformatting.
+        project_separator: Separator string between project blocks. Detected
+                          from template. Falls back to "\n\n" if None.
+
+    Returns:
+        Raw LaTeX string to inject for this marker, or empty string if
+        the section is excluded or has no content.
+    """
+    from agents.cv_content_helpers import SECTION_TO_MARKER, MARKER_TO_SECTION
+
+    if template_blocks is None:
+        template_blocks = {}
+    if template_style_examples is None:
+        template_style_examples = {}
+
+    sections_to_include = selection.get("sections_to_include", {})
+    value = sections_to_include.get(marker)
+
+    # Section excluded by LLM — return "" to signal explicit removal
+    if not value:
+        logger.info("Section %s excluded by LLM selection", marker)
+        return ""
+
+    # HEADER is always from the template default — never from master_cv
+    if marker == "HEADER":
+        return None  # Sentinel: keep template default
+
+    # Map marker back to master_cv section name
+    master_section = MARKER_TO_SECTION.get(marker)
+    if not master_section:
+        logger.warning(
+            "No master_cv section mapped to marker '%s' — keeping template default",
+            marker,
+        )
+        return None  # Keep template default
+
+    raw_content = raw_sections.get(master_section, "")
+    if not raw_content:
+        logger.warning(
+            "Master CV has no content for section '%s' (marker: %s) — keeping template default",
+            master_section, marker,
+        )
+        return None  # Keep template default
+
+    # SKILLS with skill_category_order: reorder categories
+    if marker == "SKILLS" and value is True:
+        skill_order = selection.get("skill_category_order", [])
+        if skill_order:
+            from agents.cv_content_helpers import extract_skill_categories
+            cat_blocks = extract_skill_categories(raw_content)
+            if cat_blocks:
+                ordered_parts: list[str] = []
+                used_cats: set[str] = set()
+                for cat_name in skill_order:
+                    if cat_name in cat_blocks:
+                        ordered_parts.append(cat_blocks[cat_name])
+                        used_cats.add(cat_name)
+                    else:
+                        matched = _fuzzy_find(cat_name, cat_blocks)
+                        if matched:
+                            ordered_parts.append(cat_blocks[matched])
+                            used_cats.add(matched)
+                        else:
+                            logger.warning(
+                                "Skill category '%s' not found — skipping",
+                                cat_name,
+                            )
+                # Append remaining categories not in the order list
+                for cat_name, block in cat_blocks.items():
+                    if cat_name not in used_cats:
+                        ordered_parts.append(block)
+                if ordered_parts:
+                    return "\n".join(ordered_parts)
+        return raw_content
+
+    # For sections with value=True, apply Tier 1 principle:
+    # prefer template content if available, fall back to master_cv.
+    # This ensures template-curated content (e.g. Education without high
+    # school) is preserved rather than being overwritten by verbose master_cv.
+    if value is True:
+        tmpl_content = template_style_examples.get(marker, "").strip()
+        if tmpl_content:
+            logger.info(
+                "TIER 1 [%s]: using template version (value=True, template has content)",
+                marker,
+            )
+            return tmpl_content
+        return raw_content
+
+    # For list-based selections (PROJECTS, EXPERIENCE, CERTIFICATIONS, LEADERSHIP),
+    # use 3-tier content resolution: template → reformat → master_cv fallback
+    if isinstance(value, list) and marker in block_registry:
+        master_blocks = block_registry[marker]
+        tmpl_blocks = template_blocks.get(marker, {})
+        style_example = template_style_examples.get(marker, "")
+        ordered_content: list[str] = []
+
+        # Determine the order — use project_order/experience_order if available
+        order_key = {
+            "PROJECTS": "project_order",
+            "EXPERIENCE": "experience_order",
+            "CERTIFICATIONS": "certification_order",
+            "LEADERSHIP": "leadership_order",
+        }.get(marker)
+
+        ordered_names = selection.get(order_key, value) if order_key else value
+
+        for name in ordered_names:
+            block = _resolve_block(
+                name=name,
+                marker=marker,
+                master_blocks=master_blocks,
+                tmpl_blocks=tmpl_blocks,
+                style_example=style_example,
+            )
+            if block is not None:
+                ordered_content.append(block)
+
+        if not ordered_content:
+            logger.warning(
+                "No valid blocks found for %s — falling back to full section",
+                marker,
+            )
+            return raw_content
+
+        # Join blocks with appropriate spacing
+        if marker == "PROJECTS":
+            sep = project_separator if project_separator else "\n\n"
+            return sep.join(ordered_content)
+        else:
+            return "\n\n".join(ordered_content)
+
+    # Fallback: if value is a list but no block registry, inject full section
+    return raw_content
+
+
+def _resolve_block(
+    name: str,
+    marker: str,
+    master_blocks: dict[str, str],
+    tmpl_blocks: dict[str, str],
+    style_example: str,
+) -> str | None:
+    """Resolve a single named block using 3-tier content resolution.
+
+    TIER 1: Template match — use template version verbatim.
+    TIER 2: Reformat — master_cv content reformatted to template style.
+    TIER 3: Raw fallback — master_cv content as-is.
+
+    Returns the LaTeX block string, or None if not found anywhere.
+    """
+    # TIER 1: Check template blocks for a matching name
+    if tmpl_blocks:
+        tmpl_key = _fuzzy_find_in_template(name, tmpl_blocks)
+        if tmpl_key:
+            logger.info(
+                "TIER 1 [%s]: using template version for '%s' (matched '%s')",
+                marker, name, tmpl_key,
+            )
+            return tmpl_blocks[tmpl_key]
+
+    # Find the master_cv block
+    master_block = None
+    if name in master_blocks:
+        master_block = master_blocks[name]
+    else:
+        matched_key = _fuzzy_find(name, master_blocks)
+        if matched_key:
+            master_block = master_blocks[matched_key]
+
+    if master_block is None:
+        logger.warning(
+            "Block '%s' not found in %s (template or master_cv) — skipping",
+            name, marker,
+        )
+        return None
+
+    # TIER 2: Reformat if template has style examples and styles differ
+    if style_example and needs_reformatting(master_block, style_example):
+        logger.info(
+            "TIER 2 [%s]: reformatting '%s' from master_cv to template style",
+            marker, name,
+        )
+        try:
+            reformatted = reformat_to_template_style(
+                master_block, style_example, marker,
+            )
+            return reformatted
+        except (ValueError, Exception) as exc:
+            logger.warning(
+                "TIER 2 [%s]: reformat failed for '%s': %s — falling back to TIER 3",
+                marker, name, exc,
+            )
+            # Fall through to TIER 3
+
+    # TIER 3: Use master_cv content as-is
+    logger.info(
+        "TIER 3 [%s]: using master_cv version for '%s' (no reformat needed)",
+        marker, name,
+    )
+    return master_block
+
+
+def _inject_into_template(
+    template: str,
+    assembled: dict[str, str],
+) -> str:
+    """Replace %%INJECT:SECTION%%...%%END:SECTION%% blocks in the template.
+
+    For each marker:
+    - If assembled[marker] is a non-empty string: replace with that content.
+    - If assembled[marker] is None or marker not in assembled: keep template default.
+    - If assembled[marker] is empty string "": section was explicitly excluded —
+      remove the %%INJECT%%...%%END%% block AND the preceding \\section{} line.
+    """
+    def _replacer(match: re.Match) -> str:
+        section = match.group("section")
+        content = assembled.get(section)
+
+        if content is None:
+            # Not in assembled dict — keep template default
+            return match.group(0)
+        elif content == "":
+            # Explicitly excluded — return empty (will be cleaned up)
+            return ""
+        else:
+            # Has content — inject it
+            return f"%%INJECT:{section}%%\n{content}\n%%END:{section}%%"
+
+    result = _INJECT_PATTERN.sub(_replacer, template)
+
+    # Clean up orphaned \section{} lines that precede now-empty blocks.
+    # Pattern: \section{...}\n\n  (with nothing after until the next \section or \end)
+    result = re.sub(
+        r"\\section\*?\{[^}]*\}\s*\n\s*\n(?=\\section|\\end\{document\}|%---|$)",
+        "",
+        result,
+    )
+    # Also clean up any double-blank-line artifacts
+    result = re.sub(r"\n{3,}", "\n\n", result)
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Step 5 — Compile PDF with pdflatex
+# ═══════════════════════════════════════════════════════════════════════
 
 def _install_missing_packages(missing: list[str]) -> bool:
     """Attempt to install missing LaTeX packages via tlmgr.
@@ -292,9 +469,6 @@ def _compile_pdf(tex_path: Path) -> Path:
 
     If pdflatex fails due to missing .sty packages, attempts to auto-install
     them via tlmgr and retries compilation.
-
-    Args:
-        tex_path: Absolute path to the .tex file.
 
     Returns:
         Absolute path to the compiled .pdf file.
@@ -375,124 +549,403 @@ def _compile_pdf(tex_path: Path) -> Path:
 
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Step 6 — Page enforcement loop (instruction-aware)
+# ═══════════════════════════════════════════════════════════════════════
 
-def tailor(cv_sections: list[str], requirements: dict) -> tuple[str, str]:
-    """Tailor the master CV to a specific job description and compile to PDF.
+# Sections that can be trimmed to fit page limit, in priority order
+# (lowest priority = removed first). HEADER, EDUCATION, SKILLS are
+# never removed — they're required.
+_TRIMMABLE_SECTIONS_PRIORITY = [
+    # First: trim projects from the bottom of project_order
+    "PROJECTS",
+    # Then: remove optional sections entirely
+    "CERTIFICATIONS",
+    "LEADERSHIP",
+    # Last resort: trim experience entries
+    "EXPERIENCE",
+]
 
-    Retrieves the resume template and tailoring instructions from ChromaDB,
-    generates tailored LaTeX for each section using the LLM, compiles to PDF,
-    and returns a structured summary of what the resume emphasises.
 
-    Args:
-        cv_sections: List of relevant CV section texts (from cv_rag).
-        requirements: The requirements dict from jd_parser (must contain
-                      'role', 'company', 'skills', 'cover_letter_required').
+def _compile_and_count(
+    template: str,
+    assembled: dict[str, str],
+    tex_path: Path,
+) -> tuple[Path, int]:
+    """Write assembled template to disk, compile PDF, return (pdf_path, page_count)."""
+    tex_path.write_text(
+        _inject_into_template(template, assembled),
+        encoding="utf-8",
+    )
+    pdf_path = _compile_pdf(tex_path)
+    pages = _get_page_count(pdf_path)
+    return pdf_path, pages
+
+
+def _enforce_page_limit(
+    template: str,
+    assembled: dict[str, str],
+    selection: dict,
+    block_registry: dict[str, dict[str, str]],
+    raw_sections: dict[str, str],
+    page_limit: int,
+    tex_path: Path,
+    template_blocks: dict[str, dict[str, str]] | None = None,
+    template_style_examples: dict[str, str] | None = None,
+    project_separator: str | None = None,
+) -> Path:
+    """Compile and enforce page limit by progressively trimming content.
+
+    Trimming strategy (in order):
+      1. Remove lowest-priority projects (last in project_order) one by one
+      2. Remove CERTIFICATIONS section entirely
+      3. Remove LEADERSHIP section entirely
+      4. Remove EXPERIENCE entries (last first)
+
+    Stops as soon as the PDF fits within page_limit.
 
     Returns:
-        A tuple of (resume_pdf_path, resume_content) where:
-        - resume_pdf_path is the absolute path string to the compiled PDF
-        - resume_content is a structured bullet-point summary for cover_letter.py
+        Path to the final PDF that meets the page constraint.
     """
-    from llm.client import complete
+    # Initial compile
+    pdf_path, pages = _compile_and_count(template, assembled, tex_path)
 
-    role = requirements.get("role", "unknown_role")
-    company = requirements.get("company", "unknown_company")
-    cover_letter_required = requirements.get("cover_letter_required", False)
+    if pages <= page_limit:
+        logger.info("PDF is %d page(s) — within %d-page limit ✓", pages, page_limit)
+        return pdf_path
 
     logger.info(
-        "Tailoring resume for '%s' at '%s' (cover_letter_required=%s)",
-        role,
-        company,
-        cover_letter_required,
+        "PDF is %d page(s) — exceeds %d-page limit. Starting enforcement loop.",
+        pages, page_limit,
     )
 
-    # Step 1: Retrieve template and instructions from ChromaDB
-    template = _retrieve_by_type("template")
-    instructions = _retrieve_by_type("instructions")
+    sections_to_include = selection.get("sections_to_include", {})
+    iteration = 0
+    max_iterations = 20  # Safety valve
 
-    # Step 2: Extract injectable sections from template
-    section_names = _extract_sections(template)
-    if not section_names:
-        raise RuntimeError(
-            "No %%INJECT:<SECTION>%% markers found in the resume template. "
-            "Check your resume_template.tex and re-run 'python cv/embed_cv.py'."
+    # ── Phase 1: Trim projects from bottom of project_order ──
+    project_order = list(selection.get("project_order", []))
+
+    while pages > page_limit and len(project_order) > 1 and iteration < max_iterations:
+        iteration += 1
+        removed = project_order.pop()
+        logger.info(
+            "Enforcement [iter %d]: removing project '%s' "
+            "(pages: %d, limit: %d, projects left: %d)",
+            iteration, removed, pages, page_limit, len(project_order),
         )
 
-    # Step 3: Generate tailored LaTeX for each section via LLM
-    section_contents: dict[str, str] = {}
-    section_defaults: dict[str, str] = {}
+        sections_to_include["PROJECTS"] = list(project_order)
+        selection["project_order"] = list(project_order)
+        assembled["PROJECTS"] = _assemble_section_content(
+            "PROJECTS", selection, raw_sections, block_registry,
+            template_blocks=template_blocks,
+            template_style_examples=template_style_examples,
+            project_separator=project_separator,
+        )
+        pdf_path, pages = _compile_and_count(template, assembled, tex_path)
 
-    # First, extract default content for each section (for reference in prompts)
-    for match in _INJECT_PATTERN.finditer(template):
-        section_defaults[match.group("section")] = match.group("default").strip()
+    if pages <= page_limit:
+        logger.info("Page enforcement succeeded after trimming projects ✓")
+        return pdf_path
+
+    # ── Phase 2: Remove optional sections entirely ──
+    optional_sections = ["CERTIFICATIONS", "LEADERSHIP"]
+
+    for section in optional_sections:
+        if pages <= page_limit:
+            break
+        if not sections_to_include.get(section):
+            continue  # Already excluded
+
+        iteration += 1
+        logger.info(
+            "Enforcement [iter %d]: removing section '%s' "
+            "(pages: %d, limit: %d)",
+            iteration, section, pages, page_limit,
+        )
+
+        sections_to_include[section] = False
+        assembled[section] = ""
+        pdf_path, pages = _compile_and_count(template, assembled, tex_path)
+
+    if pages <= page_limit:
+        logger.info("Page enforcement succeeded after removing optional sections ✓")
+        return pdf_path
+
+    # ── Phase 3: Trim experience entries ──
+    experience_raw = sections_to_include.get("EXPERIENCE", [])
+    if isinstance(experience_raw, bool):
+        # If True, convert to list of all experience names
+        experience_entries = list(block_registry.get("EXPERIENCE", {}).keys())
+    elif isinstance(experience_raw, list):
+        experience_entries = list(experience_raw)
+    else:
+        experience_entries = []
+
+    while (
+        pages > page_limit
+        and len(experience_entries) > 0
+        and iteration < max_iterations
+    ):
+        iteration += 1
+        removed = experience_entries.pop()
+        logger.info(
+            "Enforcement [iter %d]: removing experience '%s' "
+            "(pages: %d, limit: %d)",
+            iteration, removed, pages, page_limit,
+        )
+
+        if experience_entries:
+            sections_to_include["EXPERIENCE"] = list(experience_entries)
+            assembled["EXPERIENCE"] = _assemble_section_content(
+                "EXPERIENCE", selection, raw_sections, block_registry,
+                template_blocks=template_blocks,
+                template_style_examples=template_style_examples,
+            )
+        else:
+            # All experience removed — clear the section
+            sections_to_include["EXPERIENCE"] = False
+            assembled["EXPERIENCE"] = ""
+
+        pdf_path, pages = _compile_and_count(template, assembled, tex_path)
+
+    if pages <= page_limit:
+        logger.info("Page enforcement succeeded after trimming experience ✓")
+    else:
+        logger.warning(
+            "Could not reduce PDF to %d page(s) after all trimming — "
+            "final is %d page(s). Remaining content may be irreducible "
+            "(header + education + skills + 1 project).",
+            page_limit, pages,
+        )
+
+    return pdf_path
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Step 7 — Generate resume_content summary (for cover_letter.py)
+# ═══════════════════════════════════════════════════════════════════════
+
+def _generate_resume_content_summary(
+    selection: dict,
+    requirements: dict,
+    instructions: str,
+) -> str:
+    """Generate a structured plain-text summary of the tailored resume.
+
+    This is a small LLM call that reads the selection JSON (what was
+    included/excluded and in what order) and produces a summary for
+    cover_letter.py to consume. It does NOT generate any LaTeX.
+    """
+    sections = selection.get("sections_to_include", {})
+    project_order = selection.get("project_order", [])
+    experience_note = selection.get("experience_note", "")
+
+    prompt = f"""You are summarising a tailored resume for a cover letter writer.
+
+ROLE: {requirements.get('role', 'Unknown')}
+COMPANY: {requirements.get('company', 'Unknown')}
+
+WHAT WAS INCLUDED IN THE RESUME:
+- Sections included: {', '.join(k for k, v in sections.items() if v)}
+- Projects (in order): {', '.join(project_order) if project_order else 'All'}
+- Experience selection note: {experience_note or 'None'}
+
+TAILORING INSTRUCTIONS USED:
+{instructions}
+
+Write a structured bullet-point summary (5-8 bullets) covering:
+1. Which projects were selected and why they're relevant
+2. What skills/experience were highlighted
+3. What narrative angle or positioning was chosen
+4. What was deliberately omitted and why
+5. What the cover letter should complement (not repeat)
+
+Be specific — reference actual project names and skills. Keep each bullet to 1-2 sentences.
+Output ONLY the bullet points, no preamble."""
 
     system_prompt = (
-        "You are an expert resume writer. You generate precise, valid LaTeX content "
-        "for resume sections. Never output markdown, code fences, or commentary. "
-        "Output raw LaTeX only."
+        "You are a resume analysis assistant. Summarise what a tailored resume "
+        "emphasises so a cover letter can complement it. Be concise and specific."
     )
 
-    for section_name in section_names:
-        default_content = section_defaults.get(section_name, "")
-        prompt = _build_section_prompt(
-            section_name=section_name,
-            cv_sections=cv_sections,
-            requirements=requirements,
-            instructions=instructions,
-            default_content=default_content,
-        )
+    try:
+        summary = complete(prompt, system_prompt=system_prompt)
+        logger.info("Resume content summary generated (%d chars)", len(summary))
+        return summary
+    except Exception as exc:
+        logger.error("Failed to generate resume content summary: %s", exc)
+        # Fallback: build a basic summary from the selection data
+        lines = [
+            f"- Resume tailored for {requirements.get('role', 'the role')} at {requirements.get('company', 'the company')}",
+            f"- Projects included (in order): {', '.join(project_order) if project_order else 'all from master CV'}",
+            f"- Experience note: {experience_note or 'all experience included'}",
+        ]
+        return "\n".join(lines)
 
-        logger.info("Generating LaTeX for section: %s", section_name)
-        raw_response = complete(prompt, system_prompt=system_prompt)
 
-        # Strip any accidental markdown fences the LLM might add
-        content = raw_response.strip()
-        content = re.sub(r"^```(?:latex|tex)?\s*\n?", "", content)
-        content = re.sub(r"\n?```\s*$", "", content)
-        content = content.strip()
+# ═══════════════════════════════════════════════════════════════════════
+# Public API — tailor()
+# ═══════════════════════════════════════════════════════════════════════
 
-        # Fix common LaTeX issues from LLM output
-        content = _clean_latex_content(content)
+def tailor(cv_sections: list[str], requirements: dict) -> tuple[str, str]:
+    """Tailor the master CV for a job and compile to PDF.
 
-        section_contents[section_name] = content
-        logger.info(
-            "Section '%s' generated (%d chars)", section_name, len(content)
-        )
+    SELECT-ONLY approach: the LLM picks content from master_cv.tex.
+    All LaTeX in the output exists verbatim in the source files.
 
-    # Step 4: Fill template with generated content
-    filled_tex = _fill_template(template, section_contents)
+    Args:
+        cv_sections: Retrieved CV sections from ChromaDB (used for context
+                     but the actual LaTeX comes from master_cv.tex directly).
+        requirements: Parsed job requirements dict from jd_parser.
 
-    # Step 5: Write .tex file
-    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = str(int(time.time()))
-    tex_filename = f"tailored_{timestamp}.tex"
-    tex_path = _OUTPUT_DIR / tex_filename
-    tex_path.write_text(filled_tex, encoding="utf-8")
-    logger.info("Wrote tailored .tex: %s", tex_path)
+    Returns:
+        (pdf_path, resume_content) — path to compiled PDF and a structured
+        summary of what the resume emphasises.
+    """
+    from agents.cv_content_helpers import (
+        parse_master_cv,
+        extract_item_blocks,
+        extract_experience_blocks,
+        extract_certification_blocks,
+        build_content_inventory,
+        format_inventory_for_llm,
+        SECTION_TO_MARKER,
+    )
+    from agents.llm_selector import select_content
 
-    # Step 6: Compile to PDF
-    pdf_path = _compile_pdf(tex_path)
+    start_time = time.time()
 
-    # Step 7: Generate resume_content summary
-    resume_content_prompt = _build_resume_content_prompt(
-        sections_generated=section_contents,
-        cv_sections=cv_sections,
+    # ── Step 1: Load template and instructions from disk ──
+    template = _load_template()
+    instructions = _load_instructions()
+    page_limit = _parse_page_limit(instructions)
+    template_markers = _get_template_markers(template)
+
+    logger.info("Template markers: %s", template_markers)
+    logger.info("Page limit: %d", page_limit)
+
+    # ── Step 2: Parse master_cv.tex into raw LaTeX sections ──
+    raw_sections = parse_master_cv()
+    logger.info("Parsed %d sections from master_cv.tex", len(raw_sections))
+
+    # ── Step 3: Build content inventory and get LLM selection ──
+    inventory = build_content_inventory(raw_sections)
+    inventory_text = format_inventory_for_llm(inventory)
+
+    selection = select_content(
+        inventory=inventory,
+        inventory_text=inventory_text,
         requirements=requirements,
-        detailed=cover_letter_required,
+        instructions=instructions,
+        template_sections=template_markers,
     )
 
-    resume_content = complete(
-        resume_content_prompt,
-        system_prompt=(
-            "You are analysing a tailored resume. Output ONLY the structured "
-            "bullet-point summary in the exact format requested. No other text."
-        ),
-    ).strip()
+    logger.info("LLM selection: %s", selection)
+
+    # ── Step 4: Build block registries for sub-item sections ──
+    block_registry: dict[str, dict[str, str]] = {}
+
+    # Projects
+    if "Projects" in raw_sections:
+        block_registry["PROJECTS"] = extract_item_blocks(
+            raw_sections["Projects"]
+        )
+        logger.info(
+            "Project blocks: %s",
+            list(block_registry["PROJECTS"].keys()),
+        )
+
+    # Experience
+    if "Experience" in raw_sections:
+        block_registry["EXPERIENCE"] = extract_experience_blocks(
+            raw_sections["Experience"]
+        )
+        logger.info(
+            "Experience blocks: %s",
+            list(block_registry["EXPERIENCE"].keys()),
+        )
+
+    # Certifications
+    if "Certifications" in raw_sections:
+        block_registry["CERTIFICATIONS"] = extract_certification_blocks(
+            raw_sections["Certifications"]
+        )
+        logger.info(
+            "Certification blocks: %s",
+            list(block_registry["CERTIFICATIONS"].keys()),
+        )
+
+    # Leadership / Extra Curriculars
+    ec_key = "Extra Curriculars"
+    if ec_key in raw_sections:
+        block_registry["LEADERSHIP"] = extract_item_blocks(
+            raw_sections[ec_key]
+        )
+        logger.info(
+            "Leadership blocks: %s",
+            list(block_registry["LEADERSHIP"].keys()),
+        )
+
+    # —— Step 4b: Build template block registry (for 3-tier resolution) ——
+    template_block_registry = build_template_block_registry(template)
+    template_style_examples = extract_style_examples(template)
+
+    # Detect project separator from template
+    project_separator = None
+    if "PROJECTS" in template_style_examples and template_style_examples["PROJECTS"]:
+        project_separator = detect_project_separator(
+            template_style_examples["PROJECTS"]
+        )
 
     logger.info(
-        "Resume tailoring complete — PDF: %s, resume_content: %d chars",
-        pdf_path,
-        len(resume_content),
+        "Template block registry: %s",
+        {k: list(v.keys()) for k, v in template_block_registry.items()},
+    )
+
+    # ── Step 5: Assemble LaTeX for each template marker (3-tier resolution) ──
+    assembled: dict[str, str] = {}
+    for marker in template_markers:
+        assembled[marker] = _assemble_section_content(
+            marker, selection, raw_sections, block_registry,
+            template_blocks=template_block_registry,
+            template_style_examples=template_style_examples,
+            project_separator=project_separator,
+        )
+
+    # ── Step 6: Write .tex, compile PDF, enforce page limit ──
+    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    company = requirements.get("company", "company").replace(" ", "_")
+    role = requirements.get("role", "role").replace(" ", "_")
+    timestamp = int(time.time())
+    tex_name = f"resume_{company}_{role}_{timestamp}.tex"
+    tex_path = _OUTPUT_DIR / tex_name
+
+    pdf_path = _enforce_page_limit(
+        template=template,
+        assembled=assembled,
+        selection=selection,
+        block_registry=block_registry,
+        raw_sections=raw_sections,
+        page_limit=page_limit,
+        tex_path=tex_path,
+        template_blocks=template_block_registry,
+        template_style_examples=template_style_examples,
+        project_separator=project_separator,
+    )
+
+    # ── Step 7: Generate resume_content summary ──
+    resume_content = _generate_resume_content_summary(
+        selection, requirements, instructions,
+    )
+
+    elapsed = time.time() - start_time
+    logger.info(
+        "Resume tailored in %.1fs — PDF: %s (%d pages)",
+        elapsed, pdf_path, _get_page_count(pdf_path),
     )
 
     return str(pdf_path), resume_content
