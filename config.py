@@ -38,15 +38,43 @@ def _env(key: str) -> str | None:
 # ---------------------------------------------------------------------------
 LLM_PROVIDER: str | None = _env("LLM_PROVIDER")
 
+# Maps provider name → environment variable holding the API key.
 _PROVIDER_KEY_MAP: dict[str, str] = {
     "groq": "GROQ_API_KEY",
     "gemini": "GEMINI_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
 }
 
 # Resolved after validation
 LLM_API_KEY: str | None = None
+
+# ---------------------------------------------------------------------------
+# Single source of truth: provider → litellm model string.
+# Imported by llm/client.py — never duplicate this mapping elsewhere.
+# ---------------------------------------------------------------------------
+PROVIDER_MODEL_MAP: dict[str, str] = {
+    "groq": "groq/llama-3.3-70b-versatile",
+    "gemini": "gemini/gemini-3.1-flash-lite-preview",
+    "mistral": "mistral/mistral-small-latest",
+    "openrouter": "openrouter/auto",
+    "anthropic": "anthropic/claude-haiku-4-5",
+    "openai": "openai/gpt-4o-mini",
+}
+
+# ---------------------------------------------------------------------------
+# Groq fallback models — separate quota buckets, same API key.
+# Each model has its own TPM/RPM allocation on Groq's free tier,
+# so exhausting one doesn't block the others.
+# ---------------------------------------------------------------------------
+GROQ_FALLBACK_MODELS: list[str] = [
+    "groq/qwen/qwen3-32b",
+    "groq/openai/gpt-oss-120b",
+    "groq/meta-llama/llama-4-scout-17b-16e-instruct",
+    "groq/llama-3.1-8b-instant",
+]
 
 # ---------------------------------------------------------------------------
 # Required variables (always needed regardless of provider)
@@ -146,3 +174,52 @@ CV_DIR: Path = _PROJECT_ROOT / "cv"
 CHROMA_STORE_DIR: Path = CV_DIR / "chroma_store"
 MASTER_CV_PATH: Path = CV_DIR / "master_cv.tex"
 OUTPUT_DIR: Path = _PROJECT_ROOT / "output"
+
+# ---------------------------------------------------------------------------
+# Fallback chain — built dynamically based on which API keys are present.
+#
+# Priority order:
+#   1. Groq fallback models (4 models, separate quota buckets — same key)
+#   2. Gemini
+#   3. Mistral
+#   4. OpenRouter (auto-routes across 29+ free models)
+#   5. Anthropic (paid keys only — no meaningful free tier)
+#   6. OpenAI (paid keys only — free tier is 3 RPM on GPT-3.5 only)
+#   7. Ollama (local, unlimited, no API key required — always last)
+#
+# DeepSeek intentionally excluded — servers are in China, unsuitable
+# for CV and personal job application data.
+# ---------------------------------------------------------------------------
+
+# Primary model string (the one LLM_PROVIDER resolves to)
+_PRIMARY_MODEL: str | None = (
+    PROVIDER_MODEL_MAP[LLM_PROVIDER]
+    if LLM_PROVIDER and LLM_PROVIDER in PROVIDER_MODEL_MAP
+    else None
+)
+
+FALLBACK_CHAIN: list[str] = []
+
+# 1. Groq fallback models (separate quota buckets, same API key)
+if _env("GROQ_API_KEY") is not None:
+    for _groq_model in GROQ_FALLBACK_MODELS:
+        if _groq_model != _PRIMARY_MODEL:
+            FALLBACK_CHAIN.append(_groq_model)
+    # Also include the primary Groq model as fallback if primary provider
+    # is NOT groq (e.g. user's primary is gemini but has Groq key too)
+    _groq_primary = PROVIDER_MODEL_MAP["groq"]
+    if _groq_primary != _PRIMARY_MODEL:
+        # Insert the main Groq model at the start of the Groq section
+        FALLBACK_CHAIN.insert(0, _groq_primary)
+
+# 2–6. Other cloud providers in priority order
+_FALLBACK_PRIORITY: list[str] = ["gemini", "mistral", "openrouter", "anthropic", "openai"]
+
+for _prov in _FALLBACK_PRIORITY:
+    _model_str = PROVIDER_MODEL_MAP[_prov]
+    _key_var = _PROVIDER_KEY_MAP.get(_prov)
+    if _key_var and _env(_key_var) is not None and _model_str != _PRIMARY_MODEL:
+        FALLBACK_CHAIN.append(_model_str)
+
+# 7. Ollama is always the final fallback — local, no API key required
+FALLBACK_CHAIN.append("ollama/llama3.2")

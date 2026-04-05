@@ -325,10 +325,22 @@ You need at least one LLM key. All others are required for full functionality.
 2. API Keys → Create Key
 3. Copy → `ANTHROPIC_API_KEY`
 
-**OpenAI**
+**OpenAI** (paid — no meaningful free tier)
 1. Go to https://platform.openai.com/api-keys
 2. Create new secret key
 3. Copy → `OPENAI_API_KEY`
+
+**Mistral** (free — phone verification only)
+1. Go to https://console.mistral.ai
+2. Sign up with phone verification
+3. API Keys → Create Key
+4. Copy → `MISTRAL_API_KEY`
+
+**OpenRouter** (free — email only, auto-routes across 29+ free models)
+1. Go to https://openrouter.ai
+2. Sign up with email
+3. Keys → Create Key
+4. Copy → `OPENROUTER_API_KEY`
 
 ---
 
