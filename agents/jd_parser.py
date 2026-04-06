@@ -248,4 +248,8 @@ def parse_jd(jd_text: str) -> dict:
         requirements["skills"],
     )
 
+    # Store raw JD text for downstream conditional rule evaluation
+    # (e.g. "do not include X if not mentioned in the JD")
+    requirements["_jd_text"] = jd_text
+
     return requirements

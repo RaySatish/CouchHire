@@ -632,3 +632,171 @@ def get_page_count(pdf_path: Path) -> int:
     except Exception as exc:
         logger.warning("get_page_count: failed to read %s: %s", pdf_path, exc)
         return 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Template SKILLS extraction — category-level block splitting
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def extract_template_skill_blocks(
+    skills_latex: str,
+) -> dict[str, dict]:
+    r"""Extract individual skill category blocks from template SKILLS content.
+
+    Handles multiple template styles:
+      - tabularx: \textbf{Category: } & items \\
+      - itemize:  \item \textbf{Category:} items
+      - plain:    \textbf{Category:} items
+
+    Each \textbf{} entry becomes a separate category block.
+    If a single line contains multiple \textbf{} entries (e.g. via \hfill),
+    each is extracted independently with the full line as its block.
+
+    Returns:
+        {category_name: {"block": full_latex_line_for_that_category}}
+    """
+    if not skills_latex.strip():
+        return {}
+
+    blocks: dict[str, dict] = {}
+    lines = skills_latex.split("\n")
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Find all \textbf{Category:} or \textbf{Category: } patterns on this line
+        # The colon may be inside or outside the \textbf{} braces
+        matches = list(re.finditer(
+            r"\\textbf\{([^}]+?)(?::)?\s*\}\s*:?\s*",
+            stripped,
+        ))
+
+        if not matches:
+            continue
+
+        # Extract each category found on this line as an independent block
+        for m in matches:
+            cat_name = m.group(1).strip().rstrip(":")
+            blocks[cat_name] = {
+                "block": stripped,
+            }
+
+    if not blocks:
+        logger.debug(
+            "extract_template_skill_blocks: no \\textbf{Cat:} patterns found"
+        )
+        return {}
+
+    logger.info(
+        "Extracted %d template skill categories: %s",
+        len(blocks),
+        list(blocks.keys()),
+    )
+    return blocks
+
+
+def detect_skills_container_format(skills_latex: str) -> str:
+    r"""Detect the container format used in the template's SKILLS section.
+
+    Returns one of:
+      - "tabularx" if \begin{tabularx} is present
+      - "itemize" if \begin{itemize} is present
+      - "plain" otherwise
+    """
+    if r"\begin{tabularx}" in skills_latex:
+        return "tabularx"
+    elif r"\begin{itemize}" in skills_latex:
+        return "itemize"
+    return "plain"
+
+
+def extract_skills_container_wrapper(skills_latex: str) -> tuple[str, str]:
+    r"""Extract the opening and closing container lines from template SKILLS.
+
+    For tabularx: returns (\begin{tabularx}{...}{...}, \end{tabularx})
+    For itemize:  returns (\begin{itemize}[...], \end{itemize})
+    For plain:    returns ("", "")
+    """
+    fmt = detect_skills_container_format(skills_latex)
+
+    if fmt == "tabularx":
+        # Find the \begin{tabularx} line (may include column spec)
+        begin_match = re.search(
+            r"(\\begin\{tabularx\}[^\n]*)", skills_latex
+        )
+        end_match = re.search(
+            r"(\\end\{tabularx\})", skills_latex
+        )
+        begin = begin_match.group(1) if begin_match else r"\begin{tabularx}{\textwidth}{lX}"
+        end = end_match.group(1) if end_match else r"\end{tabularx}"
+        return begin, end
+
+    elif fmt == "itemize":
+        begin_match = re.search(
+            r"(\\begin\{itemize\}[^\n]*)", skills_latex
+        )
+        end_match = re.search(
+            r"(\\end\{itemize\})", skills_latex
+        )
+        begin = begin_match.group(1) if begin_match else r"\begin{itemize}"
+        end = end_match.group(1) if end_match else r"\end{itemize}"
+        return begin, end
+
+    return "", ""
+
+
+def reformat_skill_to_template_style(
+    category_name: str,
+    master_cv_block: str,
+    style_example_line: str,
+) -> str:
+    r"""Reformat a single skill category from master_cv style to template style.
+
+    Uses the style_example_line as a pattern. Extracts the skill items from
+    master_cv_block and formats them to match the template style.
+
+    This is a deterministic reformat (no LLM call) — it extracts the skill
+    items text and wraps it in the template's formatting pattern.
+
+    Args:
+        category_name: The skill category name (e.g. "Cloud & Tools").
+        master_cv_block: The raw LaTeX line from master_cv
+            (e.g. "\\item \\textbf{Cloud & Tools:} Docker, AWS, ...").
+        style_example_line: A template-formatted skill line to use as pattern
+            (e.g. "\\textbf{Data Engineering: } & Spark, Kafka, ... \\\\").
+
+    Returns:
+        The reformatted line matching the template style.
+    """
+    # Extract skill items from master_cv block
+    # Pattern: \textbf{Category:} items  OR  \item \textbf{Category:} items
+    items_match = re.search(
+        r"\\textbf\{[^}]+\}\s*:?\s*(.*?)(?:\\\\|$)",
+        master_cv_block,
+        re.DOTALL,
+    )
+    if items_match:
+        skill_items = items_match.group(1).strip().rstrip("\\").strip()
+    else:
+        # Fallback: everything after the first } on the line
+        brace_pos = master_cv_block.find("}")
+        skill_items = master_cv_block[brace_pos + 1:].strip() if brace_pos >= 0 else master_cv_block
+
+    # Clean up: remove \item prefix, trailing \\, extra whitespace
+    skill_items = re.sub(r"^\\item\s*", "", skill_items).strip()
+    skill_items = skill_items.rstrip("\\").strip()
+
+    # Detect template style from the example line
+    if "&" in style_example_line:
+        # tabularx style: \textbf{Category: } & items \\
+        return f"\\textbf{{{category_name}: }} & {skill_items} \\\\"
+    elif style_example_line.strip().startswith(r"\item"):
+        # itemize style: \item \textbf{Category:} items
+        return f"\\item \\textbf{{{category_name}:}} {skill_items}"
+    else:
+        # plain style: \textbf{Category:} items \\
+        trailing = " \\\\" if style_example_line.rstrip().endswith("\\\\") else ""
+        return f"\\textbf{{{category_name}:}} {skill_items}{trailing}"

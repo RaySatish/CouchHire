@@ -34,6 +34,10 @@ from agents.resume_assembler import (
     detect_project_separator,
     needs_reformatting,
     reformat_to_template_style,
+    extract_template_skill_blocks,
+    detect_skills_container_format,
+    extract_skills_container_wrapper,
+    reformat_skill_to_template_style,
 )
 
 logger = logging.getLogger(__name__)
@@ -189,36 +193,13 @@ def _assemble_section_content(
         )
         return None  # Keep template default
 
-    # SKILLS with skill_category_order: reorder categories
+    # SKILLS: 3-tier resolution with category selection
     if marker == "SKILLS" and value is True:
-        skill_order = selection.get("skill_category_order", [])
-        if skill_order:
-            from agents.cv_content_helpers import extract_skill_categories
-            cat_blocks = extract_skill_categories(raw_content)
-            if cat_blocks:
-                ordered_parts: list[str] = []
-                used_cats: set[str] = set()
-                for cat_name in skill_order:
-                    if cat_name in cat_blocks:
-                        ordered_parts.append(cat_blocks[cat_name])
-                        used_cats.add(cat_name)
-                    else:
-                        matched = _fuzzy_find(cat_name, cat_blocks)
-                        if matched:
-                            ordered_parts.append(cat_blocks[matched])
-                            used_cats.add(matched)
-                        else:
-                            logger.warning(
-                                "Skill category '%s' not found — skipping",
-                                cat_name,
-                            )
-                # Append remaining categories not in the order list
-                for cat_name, block in cat_blocks.items():
-                    if cat_name not in used_cats:
-                        ordered_parts.append(block)
-                if ordered_parts:
-                    return "\n".join(ordered_parts)
-        return raw_content
+        return _assemble_skills_section(
+            selection=selection,
+            raw_content=raw_content,
+            template_style_examples=template_style_examples,
+        )
 
     # For sections with value=True, apply Tier 1 principle:
     # prefer template content if available, fall back to master_cv.
@@ -346,6 +327,340 @@ def _resolve_block(
         marker, name,
     )
     return master_block
+
+
+
+def _filter_skill_items(
+    assembled_skills: str,
+    instructions: str,
+    jd_text: str = "",
+) -> str:
+    """Remove individual skill items from assembled LaTeX based on instructions.
+
+    Generic handler — processes ANY "do not use/include X" rule that targets
+    skill items or skill categories. No hardcoded tech names.
+
+    Handles rules like:
+    - "Do not use Raspberry Pi, TinyML or Edge AI if not relevant to the JD"
+    - "Do not use Linux/Unix in skills if not mentioned in the JD"
+    - "Do not include Quantitative Finance and Mathematics Section in Skills
+       if not a Quant-based role"
+    - "Do not use X or Y" (any items, regardless of what they are)
+
+    General resume instructions that clearly target non-skill sections
+    (e.g. "Do not include references or hobbies", "Do not include Programme
+    Representative in Leadership") are skipped.
+    """
+    if not instructions:
+        return assembled_skills
+
+    jd_lower = jd_text.lower() if jd_text else ""
+
+    # Split instructions into individual rules (one per line/bullet)
+    rules = re.split(r"\n[-•*]\s*|\n(?=\d+\.)|\n", instructions)
+
+    items_to_remove: list[str] = []
+
+    # Sections that are clearly NOT skills — if a rule targets these, skip it
+    _NON_SKILL_SECTIONS = {
+        "leadership", "achievements", "education", "projects",
+        "experience", "certifications", "header",
+    }
+
+    for rule in rules:
+        rule = rule.strip()
+        if not rule:
+            continue
+        rule_lower = rule.lower()
+
+        # Must be an exclusion rule
+        if not re.search(r"do\s+not\s+(?:use|include)", rule_lower):
+            continue
+
+        # Skip rules that explicitly target non-skill sections
+        # e.g. "Do not include Programme Representative in Leadership"
+        targets_other_section = False
+        for sec_name in _NON_SKILL_SECTIONS:
+            # Check for "in <section>" pattern at the end of the rule
+            if re.search(
+                r"in\s+(?:the\s+)?" + re.escape(sec_name),
+                rule_lower,
+            ):
+                targets_other_section = True
+                break
+        if targets_other_section:
+            logger.debug(
+                "Skill filter: skipping rule targeting other section: %s",
+                rule[:80],
+            )
+            continue
+
+        # Skip rules about general resume content (not skills/tech items)
+        # e.g. "Do not include references or hobbies", "No about section"
+        _GENERAL_CONTENT_TERMS = {
+            "references", "hobbies", "about section", "school",
+            "programme representative",
+        }
+        is_general = any(term in rule_lower for term in _GENERAL_CONTENT_TERMS)
+        if is_general:
+            continue
+
+        # Extract items to exclude from this rule
+        match = re.search(
+            r"do\s+not\s+(?:use|include)\s+"
+            r"([\w\s/,&]+(?:\s+(?:or|and)\s+[\w\s/&]+)*)"
+            r"(?:\s+(?:section\s+)?(?:in\s+(?:the\s+)?skills?\s*(?:section)?))?"
+            r"(?:\s+if\s+(?:not\s+)?(?:it\s+is\s+not\s+)?(?:a\s+)?"
+            r"(?:relevant|mentioned|quant|the\s+particular)[^.]*)?",
+            rule_lower,
+        )
+
+        if not match:
+            continue
+
+        raw_items = match.group(1).strip()
+
+        # Clean up: remove trailing context words that got captured
+        raw_items = re.sub(
+            r"\s+(?:section|in\s+the|in\s+skills|if\s+|for\s+).*$",
+            "",
+            raw_items,
+        )
+
+        # Split by comma, "or", "and"
+        parts = re.split(r"\s*,\s*|\s+or\s+|\s+and\s+", raw_items)
+
+        # Determine if this is a conditional rule (JD-dependent)
+        # Matches: "if not relevant", "if not mentioned", "if not relevant
+        # to the particular JD", etc.
+        is_conditional = bool(re.search(
+            r"if\s+(?:not\s+)?(?:it\s+is\s+not\s+)?"
+            r"(?:relevant|mentioned|in\s+(?:the\s+)?(?:jd|job))",
+            rule_lower,
+        ))
+
+        # Handle "if it is not a Quant-based role" type conditions
+        is_role_conditional = bool(re.search(
+            r"if\s+(?:not\s+|it\s+is\s+not\s+)(?:a\s+)?(?:quant|the\s+(?:it|role))",
+            rule_lower,
+        ))
+
+        for part in parts:
+            part = part.strip()
+            if not part or len(part) < 2:
+                continue
+
+            # Skip words that are clearly not skill items
+            if part in ("the", "a", "an", "it", "its", "not", "is", "to"):
+                continue
+
+            if is_conditional and jd_lower:
+                if part in jd_lower:
+                    logger.info(
+                        "Skill item '%s' found in JD — keeping", part
+                    )
+                    continue
+
+            if is_role_conditional and jd_lower:
+                if any(q in jd_lower for q in ["quant", "quantitative", "trading"]):
+                    logger.info(
+                        "Skill item '%s' kept — role appears quant-related", part
+                    )
+                    continue
+
+            items_to_remove.append(part)
+
+    if not items_to_remove:
+        return assembled_skills
+
+    logger.info("Skill items to filter: %s", items_to_remove)
+
+    # Remove items from the assembled LaTeX
+    result = assembled_skills
+    for item in items_to_remove:
+        escaped = re.escape(item)
+        # Pattern: ", Item" (preceded by comma)
+        result = re.sub(
+            r",\s*" + escaped + r"(?=[,\s\\}$])",
+            "",
+            result,
+            flags=re.IGNORECASE,
+        )
+        # Pattern: "Item, " (followed by comma)
+        result = re.sub(
+            escaped + r"\s*,\s*",
+            "",
+            result,
+            flags=re.IGNORECASE,
+        )
+        # Pattern: "Item" standalone (last resort)
+        result = re.sub(
+            r"(?<=[\s{])" + escaped + r"(?=[\s},\\])",
+            "",
+            result,
+            flags=re.IGNORECASE,
+        )
+
+    # Clean up any double commas or trailing commas
+    result = re.sub(r",\s*,", ",", result)
+    result = re.sub(r",\s*(?=[\\}])", "", result)
+    result = re.sub(r":\s*,\s*", ": ", result)
+
+    return result
+
+
+def _assemble_skills_section(
+    selection: dict,
+    raw_content: str,
+    template_style_examples: dict[str, str] | None = None,
+) -> str:
+    """Assemble the SKILLS section using 3-tier resolution with category selection.
+
+    1. Get skill_categories_to_include from LLM selection JSON
+    2. Extract skill blocks from TEMPLATE (tabularx/itemize/plain)
+    3. Extract skill blocks from MASTER_CV
+    4. For each selected category:
+       TIER 1: Use template version if category exists there
+       TIER 2: Reformat master_cv content to template style
+       TIER 3: Use master_cv version as-is
+    5. Assemble in order from skill_categories_to_include
+    6. Wrap in template's container format (tabularx/itemize/plain)
+
+    Returns:
+        Assembled LaTeX for the SKILLS section.
+    """
+    from agents.cv_content_helpers import extract_skill_categories
+
+    if template_style_examples is None:
+        template_style_examples = {}
+
+    # 1. Get selected categories from LLM
+    categories_to_include = selection.get("skill_categories_to_include", [])
+
+    # 2. Extract skill blocks from TEMPLATE
+    template_skills_latex = template_style_examples.get("SKILLS", "")
+    template_skill_blocks = extract_template_skill_blocks(template_skills_latex)
+
+    # 3. Extract skill blocks from MASTER_CV
+    master_skill_blocks = extract_skill_categories(raw_content)
+
+    # If no categories selected by LLM, fall back to all master_cv categories
+    if not categories_to_include:
+        categories_to_include = list(master_skill_blocks.keys())
+        logger.warning(
+            "No skill categories selected — using all %d from master_cv",
+            len(categories_to_include),
+        )
+
+    # 3b. Enforce required skill categories (Programming, Soft Skills)
+    # These must always be included if they exist in EITHER template or master_cv.
+    # The validator in llm_selector only checks master_cv inventory, but some
+    # required categories (e.g. Soft Skills) may only exist in the template.
+    _REQUIRED_SKILL_CATS = {"Programming", "Soft Skills"}
+    all_available = {k: None for k in (set(template_skill_blocks.keys()) | set(master_skill_blocks.keys()))}
+    cats_lower = {c.lower() for c in categories_to_include}
+    for req_cat in _REQUIRED_SKILL_CATS:
+        if req_cat.lower() not in cats_lower:
+            # Try to find in available categories (fuzzy)
+            matched = _fuzzy_find(req_cat, all_available)
+            if matched:
+                categories_to_include.append(matched)
+                cats_lower.add(matched.lower())
+                logger.info(
+                    "Enforcing required skill category '%s' (matched '%s' from %s)",
+                    req_cat, matched,
+                    "template" if matched in template_skill_blocks else "master_cv",
+                )
+
+    # 4. Build a style example line from template (first available category)
+    style_example_line = ""
+    for _tcat, tdata in template_skill_blocks.items():
+        if tdata.get("block"):
+            style_example_line = tdata["block"]
+            break
+
+    # 5. Resolve each category using 3-tier logic
+    resolved_lines: list[str] = []
+    for cat_name in categories_to_include:
+        # Try to find in template blocks (fuzzy)
+        tmpl_match = _fuzzy_find(cat_name, template_skill_blocks)
+        # Try to find in master_cv blocks (fuzzy)
+        master_match = _fuzzy_find(cat_name, master_skill_blocks)
+
+        if tmpl_match:
+            tmpl_data = template_skill_blocks[tmpl_match]
+            # TIER 1: Use template version directly
+            logger.info(
+                "SKILLS TIER 1: using template version for '%s' (matched '%s')",
+                cat_name, tmpl_match,
+            )
+            resolved_lines.append(tmpl_data["block"])
+
+        elif master_match:
+            # Category exists in master_cv but not template
+            if style_example_line:
+                # TIER 2: Reformat master_cv to template style
+                logger.info(
+                    "SKILLS TIER 2: reformatting '%s' from master_cv to template style",
+                    cat_name,
+                )
+                reformatted = reformat_skill_to_template_style(
+                    cat_name,
+                    master_skill_blocks[master_match],
+                    style_example_line,
+                )
+                resolved_lines.append(reformatted)
+            else:
+                # TIER 3: Use master_cv version as-is
+                logger.info(
+                    "SKILLS TIER 3: using master_cv version for '%s' as-is",
+                    cat_name,
+                )
+                resolved_lines.append(master_skill_blocks[master_match])
+        else:
+            logger.warning(
+                "Skill category '%s' not found in template or master_cv — skipping",
+                cat_name,
+            )
+
+    if not resolved_lines:
+        logger.warning("No skill categories resolved — returning raw content")
+        return raw_content
+
+    # Deduplicate resolved lines — some categories share a combined row
+    # in the template (e.g. "Programming" and "Soft Skills" on one line).
+    # When both are selected, the same line would be added twice.
+    seen: set[str] = set()
+    unique_lines: list[str] = []
+    for line in resolved_lines:
+        normalised = line.strip()
+        if normalised not in seen:
+            seen.add(normalised)
+            unique_lines.append(line)
+        else:
+            logger.info(
+                "SKILLS dedup: removed duplicate line (shared template row)"
+            )
+    resolved_lines = unique_lines
+
+    # 6. Wrap in the template's container format
+    container_format = detect_skills_container_format(template_skills_latex)
+    begin_wrapper, end_wrapper = extract_skills_container_wrapper(
+        template_skills_latex
+    )
+
+    inner_content = "\n".join(resolved_lines)
+
+    if container_format in ("tabularx", "itemize") and begin_wrapper:
+        result = f"{begin_wrapper}\n{inner_content}\n{end_wrapper}"
+    else:
+        result = inner_content
+
+    logger.info(
+        "SKILLS section assembled: %d categories, format=%s",
+        len(resolved_lines), container_format,
+    )
+    return result
 
 
 def _inject_into_template(
@@ -582,6 +897,70 @@ def _compile_and_count(
     return pdf_path, pages
 
 
+
+
+def _extract_mandatory_projects(instructions: str) -> set[str]:
+    """Extract project names that instructions mandate must be included.
+
+    Parses rules like:
+    - "use 3 projects: CouchHire, Market Surveillance System, NIFTY50 Portfolio Optimizer"
+    - "Always use the CouchHire project"
+    - "Lead with CouchHire project"
+
+    Returns a set of project name substrings (lowercased) that are mandatory.
+    """
+    if not instructions:
+        return set()
+
+    mandatory: set[str] = set()
+    inst_lower = instructions.lower()
+
+    # Pattern 1: "use N projects: X, Y, Z"
+    match = re.search(
+        r"use\s+\d+\s+projects?\s*:\s*([^\n.]+)",
+        inst_lower,
+    )
+    if match:
+        names_str = match.group(1).strip().rstrip(".")
+        # Split by comma, "and", or "or"
+        parts = re.split(r"\s*,\s*|\s+and\s+|\s+or\s+", names_str)
+        for part in parts:
+            part = part.strip()
+            if part and len(part) > 2:
+                mandatory.add(part)
+
+    # Pattern 2: "always use X project" / "always include X project"
+    # Only match when "project" is explicitly mentioned to avoid matching
+    # certifications like "Always Include the AWS Certification"
+    for m in re.finditer(
+        r"always\s+(?:use|include)\s+(?:the\s+)?([A-Za-z0-9][A-Za-z0-9 _\-&]+?)\s+project",
+        inst_lower,
+    ):
+        name = m.group(1).strip()
+        if name and len(name) > 2:
+            mandatory.add(name)
+
+    # Pattern 3: "lead with X project" / "lead with X for"
+    for m in re.finditer(
+        r"lead\s+with\s+([A-Za-z0-9][A-Za-z0-9 _\-&]+?)(?:\s+project|\s+for|\s*$|\s*\n)",
+        inst_lower,
+    ):
+        name = m.group(1).strip()
+        if name and len(name) > 2:
+            mandatory.add(name)
+
+    return mandatory
+
+
+def _is_mandatory_project(project_name: str, mandatory_names: set[str]) -> bool:
+    """Check if a project name matches any mandatory name (fuzzy substring match)."""
+    proj_lower = project_name.lower()
+    for mand in mandatory_names:
+        if mand in proj_lower or proj_lower.startswith(mand):
+            return True
+    return False
+
+
 def _enforce_page_limit(
     template: str,
     assembled: dict[str, str],
@@ -593,14 +972,20 @@ def _enforce_page_limit(
     template_blocks: dict[str, dict[str, str]] | None = None,
     template_style_examples: dict[str, str] | None = None,
     project_separator: str | None = None,
+    instructions: str = "",
 ) -> Path:
     """Compile and enforce page limit by progressively trimming content.
 
-    Trimming strategy (in order):
-      1. Remove lowest-priority projects (last in project_order) one by one
+    Instruction-aware trimming strategy (in order):
+      1. Remove NON-MANDATORY projects (last in project_order) one by one
       2. Remove CERTIFICATIONS section entirely
       3. Remove LEADERSHIP section entirely
-      4. Remove EXPERIENCE entries (last first)
+      4. Trim experience entries (last first)
+      5. LAST RESORT: Remove mandatory projects (last first, preserving at least 1)
+
+    Projects that are mandated by user instructions (e.g. "use 3 projects:
+    CouchHire, Market Surveillance, NIFTY50") are protected from trimming
+    until all other options are exhausted.
 
     Stops as soon as the PDF fits within page_limit.
 
@@ -619,18 +1004,39 @@ def _enforce_page_limit(
         pages, page_limit,
     )
 
+    # Determine which projects are mandatory per instructions
+    mandatory_names = _extract_mandatory_projects(instructions)
+    if mandatory_names:
+        logger.info(
+            "Instruction-mandated projects (protected from early trimming): %s",
+            mandatory_names,
+        )
+
     sections_to_include = selection.get("sections_to_include", {})
     iteration = 0
     max_iterations = 20  # Safety valve
 
-    # ── Phase 1: Trim projects from bottom of project_order ──
+    # ── Phase 1: Trim NON-MANDATORY projects from bottom of project_order ──
     project_order = list(selection.get("project_order", []))
 
-    while pages > page_limit and len(project_order) > 1 and iteration < max_iterations:
+    # Separate mandatory and non-mandatory projects (preserving order)
+    non_mandatory_indices = [
+        i for i, p in enumerate(project_order)
+        if not _is_mandatory_project(p, mandatory_names)
+    ]
+
+    # Remove non-mandatory projects from the end first
+    while (
+        pages > page_limit
+        and non_mandatory_indices
+        and len(project_order) > 1
+        and iteration < max_iterations
+    ):
         iteration += 1
-        removed = project_order.pop()
+        remove_idx = non_mandatory_indices.pop()
+        removed = project_order.pop(remove_idx)
         logger.info(
-            "Enforcement [iter %d]: removing project '%s' "
+            "Enforcement [iter %d]: removing non-mandatory project '%s' "
             "(pages: %d, limit: %d, projects left: %d)",
             iteration, removed, pages, page_limit, len(project_order),
         )
@@ -646,10 +1052,63 @@ def _enforce_page_limit(
         pdf_path, pages = _compile_and_count(template, assembled, tex_path)
 
     if pages <= page_limit:
-        logger.info("Page enforcement succeeded after trimming projects ✓")
+        logger.info("Page enforcement succeeded after trimming non-mandatory projects ✓")
         return pdf_path
 
-    # ── Phase 2: Remove optional sections entirely ──
+    # ── Phase 2: Remove optional sections (only if NOT mandated by instructions) ──
+    # Check if instructions mandate items in these sections.
+    # A section is "instruction-protected" if the instructions contain an
+    # "always include" rule that references an item belonging to that section,
+    # OR if the section is explicitly required (e.g. "always include the
+    # Leadership and Achievement section").
+    inst_lower = instructions.lower() if instructions else ""
+    _section_protected: dict[str, bool] = {}
+
+    def _is_section_protected(section: str) -> bool:
+        """Check if any instruction rule mandates content in this section."""
+        if not inst_lower:
+            return False
+        # Split instructions into individual rules
+        rules = re.split(r"\n[-•*]\s*|\n(?=\d+\.)|\n", inst_lower)
+        for rule in rules:
+            rule = rule.strip()
+            if not rule:
+                continue
+            # Check for "always include" rules
+            is_always = "always" in rule and ("include" in rule or "use" in rule)
+            # Check for "instead include" rules (implies mandatory)
+            is_instead = "instead" in rule and "include" in rule
+            if not is_always and not is_instead:
+                continue
+            # Check if the rule references this section or items in it
+            if section == "LEADERSHIP":
+                if any(term in rule for term in [
+                    "leadership", "achievement", "organiser", "organizer",
+                    "certificate of merit", "merit scholarship",
+                ]):
+                    return True
+            elif section == "CERTIFICATIONS":
+                if any(term in rule for term in [
+                    "certification", "aws", "machine learning specialization",
+                    "oracle", "certified",
+                ]):
+                    return True
+            elif section == "EXPERIENCE":
+                if any(term in rule for term in [
+                    "experience", "intern", "work",
+                ]):
+                    return True
+        return False
+
+    for section in ("CERTIFICATIONS", "LEADERSHIP", "EXPERIENCE"):
+        _section_protected[section] = _is_section_protected(section)
+        if _section_protected[section]:
+            logger.info(
+                "Section '%s' is instruction-protected — will not be removed "
+                "during page enforcement",
+                section,
+            )
+
     optional_sections = ["CERTIFICATIONS", "LEADERSHIP"]
 
     for section in optional_sections:
@@ -657,6 +1116,13 @@ def _enforce_page_limit(
             break
         if not sections_to_include.get(section):
             continue  # Already excluded
+        if _section_protected.get(section, False):
+            logger.info(
+                "Enforcement: skipping removal of instruction-protected "
+                "section '%s'",
+                section,
+            )
+            continue
 
         iteration += 1
         logger.info(
@@ -704,14 +1170,65 @@ def _enforce_page_limit(
                 template_style_examples=template_style_examples,
             )
         else:
-            # All experience removed — clear the section
-            sections_to_include["EXPERIENCE"] = False
-            assembled["EXPERIENCE"] = ""
+            # All individual entries removed
+            if _section_protected.get("EXPERIENCE", False):
+                # Instruction says "always include experience" — fall back
+                # to template version so the section heading stays
+                tmpl_exp = template_style_examples.get("EXPERIENCE", "") if template_style_examples else ""
+                if tmpl_exp.strip():
+                    logger.info(
+                        "EXPERIENCE is instruction-protected — keeping "
+                        "template version instead of removing entirely"
+                    )
+                    sections_to_include["EXPERIENCE"] = True
+                    assembled["EXPERIENCE"] = tmpl_exp.strip()
+                else:
+                    logger.warning(
+                        "EXPERIENCE is instruction-protected but no template "
+                        "content available — section will be empty"
+                    )
+                    sections_to_include["EXPERIENCE"] = False
+                    assembled["EXPERIENCE"] = ""
+            else:
+                # Not protected — clear the section
+                sections_to_include["EXPERIENCE"] = False
+                assembled["EXPERIENCE"] = ""
 
         pdf_path, pages = _compile_and_count(template, assembled, tex_path)
 
     if pages <= page_limit:
         logger.info("Page enforcement succeeded after trimming experience ✓")
+        return pdf_path
+
+    # ── Phase 4 (LAST RESORT): Trim mandatory projects ──
+    # Only reached if all optional sections and experience are exhausted.
+    logger.warning(
+        "All optional content exhausted — trimming mandatory projects as last resort "
+        "(pages: %d, limit: %d)",
+        pages, page_limit,
+    )
+
+    while pages > page_limit and len(project_order) > 1 and iteration < max_iterations:
+        iteration += 1
+        removed = project_order.pop()
+        logger.warning(
+            "Enforcement [iter %d]: removing MANDATORY project '%s' (last resort) "
+            "(pages: %d, limit: %d, projects left: %d)",
+            iteration, removed, pages, page_limit, len(project_order),
+        )
+
+        sections_to_include["PROJECTS"] = list(project_order)
+        selection["project_order"] = list(project_order)
+        assembled["PROJECTS"] = _assemble_section_content(
+            "PROJECTS", selection, raw_sections, block_registry,
+            template_blocks=template_blocks,
+            template_style_examples=template_style_examples,
+            project_separator=project_separator,
+        )
+        pdf_path, pages = _compile_and_count(template, assembled, tex_path)
+
+    if pages <= page_limit:
+        logger.info("Page enforcement succeeded after trimming mandatory projects ✓")
     else:
         logger.warning(
             "Could not reduce PDF to %d page(s) after all trimming — "
@@ -753,7 +1270,7 @@ WHAT WAS INCLUDED IN THE RESUME:
 - Projects (in order): {', '.join(project_order) if project_order else 'All'}
 - Experience selection note: {experience_note or 'None'}
 
-TAILORING INSTRUCTIONS USED:
+MANDATORY TAILORING RULES THAT WERE APPLIED:
 {instructions}
 
 Write a structured bullet-point summary (5-8 bullets) covering:
@@ -835,12 +1352,16 @@ def tailor(cv_sections: list[str], requirements: dict) -> tuple[str, str]:
     inventory = build_content_inventory(raw_sections)
     inventory_text = format_inventory_for_llm(inventory)
 
+    # Propagate raw JD text for conditional rule evaluation
+    jd_text = requirements.get("_jd_text", "")
+
     selection = select_content(
         inventory=inventory,
         inventory_text=inventory_text,
         requirements=requirements,
         instructions=instructions,
         template_sections=template_markers,
+        jd_text=jd_text,
     )
 
     logger.info("LLM selection: %s", selection)
@@ -889,6 +1410,23 @@ def tailor(cv_sections: list[str], requirements: dict) -> tuple[str, str]:
             list(block_registry["LEADERSHIP"].keys()),
         )
 
+    # Cross-section: merge Academic Achievement items into LEADERSHIP
+    # so that instructions like "include Certificate of Merit in Leadership"
+    # can be resolved. Items from Academic Achievements are appended to the
+    # LEADERSHIP block registry without overwriting existing entries.
+    acad_key = "Academic Achievements"
+    if acad_key in raw_sections:
+        acad_blocks = extract_item_blocks(raw_sections[acad_key])
+        if "LEADERSHIP" not in block_registry:
+            block_registry["LEADERSHIP"] = {}
+        for name, tex in acad_blocks.items():
+            if name not in block_registry["LEADERSHIP"]:
+                block_registry["LEADERSHIP"][name] = tex
+                logger.info(
+                    "Merged Academic Achievement '%s' into LEADERSHIP registry",
+                    name,
+                )
+
     # —— Step 4b: Build template block registry (for 3-tier resolution) ——
     template_block_registry = build_template_block_registry(template)
     template_style_examples = extract_style_examples(template)
@@ -915,11 +1453,19 @@ def tailor(cv_sections: list[str], requirements: dict) -> tuple[str, str]:
             project_separator=project_separator,
         )
 
+    # ── Step 5b: Filter individual skill items based on instructions ──
+    if "SKILLS" in assembled and instructions:
+        assembled["SKILLS"] = _filter_skill_items(
+            assembled["SKILLS"],
+            instructions,
+            jd_text=requirements.get("_jd_text", ""),
+        )
+
     # ── Step 6: Write .tex, compile PDF, enforce page limit ──
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    company = requirements.get("company", "company").replace(" ", "_")
-    role = requirements.get("role", "role").replace(" ", "_")
+    company = (requirements.get("company") or "company").replace(" ", "_")
+    role = (requirements.get("role") or "role").replace(" ", "_")
     timestamp = int(time.time())
     tex_name = f"resume_{company}_{role}_{timestamp}.tex"
     tex_path = _OUTPUT_DIR / tex_name
@@ -935,6 +1481,7 @@ def tailor(cv_sections: list[str], requirements: dict) -> tuple[str, str]:
         template_blocks=template_block_registry,
         template_style_examples=template_style_examples,
         project_separator=project_separator,
+        instructions=instructions,
     )
 
     # ── Step 7: Generate resume_content summary ──

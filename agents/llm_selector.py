@@ -18,22 +18,46 @@ logger = logging.getLogger(__name__)
 # System prompt — enforces JSON-only output, no LaTeX, no hallucination
 # ══════════════════════════════════════════════════════════════════════════
 
-_SYSTEM_PROMPT = """\
-You are a resume content strategist. Your ONLY job is to SELECT which \
-existing content to include in a tailored 1-page resume and in what ORDER.
-
-RULES:
-- You MUST respond with valid JSON only — no markdown, no commentary, \
-no code fences, no explanations.
-- You may ONLY reference items that appear in the CONTENT INVENTORY below.
-- You must use the EXACT names from the inventory — do not rephrase, \
-abbreviate, or modify them.
-- You do NOT write any resume content. You only select and order.
-- If a section should be included in full, set its value to true.
-- If specific items from a section should be included, list them by \
-their EXACT names from the inventory.
-- The final resume must fit on 1 page. Be selective — 3-4 projects is \
-typical, not all 7."""
+_SYSTEM_PROMPT = (
+    "You are a resume content strategist. Your ONLY job is to SELECT which "
+    "existing content to include in a tailored resume and in what ORDER.\n"
+    "\n"
+    "═══ ABSOLUTE PRIORITY — MANDATORY USER RULES ═══\n"
+    "The prompt below contains a section called \"MANDATORY USER RULES\". "
+    "These are NON-NEGOTIABLE constraints set by the resume owner. "
+    "They OVERRIDE your own judgement about relevance, ordering, or fit.\n"
+    "\n"
+    "RULE INTERPRETATION GUIDE:\n"
+    "- \"Always include X\" → X MUST appear in your selection. Period.\n"
+    "- \"Do not include Y\" → Y MUST NOT appear. Period.\n"
+    "- \"Lead with X\" / \"X should be first\" → X MUST be position 1 in the "
+    "relevant order list.\n"
+    "- Conditional rules (\"for AI/ML roles use...\", \"except for Quant\") → "
+    "Check if the condition applies to THIS specific role. If yes, enforce. "
+    "If no, skip.\n"
+    "- \"Use X in skills\" / \"include X category\" → The named skill category "
+    "MUST be in skill_categories_to_include.\n"
+    "- \"Do not use X if not relevant/mentioned in JD\" → Check if X appears "
+    "in the job description. If NOT mentioned, exclude it. If mentioned, keep it.\n"
+    "\n"
+    "CRITICAL: Process EVERY rule one by one. Do not skip any. "
+    "A single missed rule is a critical failure.\n"
+    "Violating ANY mandatory rule is worse than selecting suboptimal content.\n"
+    "\n"
+    "OUTPUT RULES:\n"
+    "- You MUST respond with valid JSON only — no markdown, no commentary, "
+    "no code fences, no explanations.\n"
+    "- You may ONLY reference items that appear in the CONTENT INVENTORY below.\n"
+    "- You must use the EXACT names from the inventory — do not rephrase, "
+    "abbreviate, or modify them.\n"
+    "- You do NOT write any resume content. You only select and order.\n"
+    "- If a section should be included in full, set its value to true.\n"
+    "- If specific items from a section should be included, list them by "
+    "their EXACT names from the inventory.\n"
+    "- Be selective — typically 3-4 projects, not all.\n"
+    "- For SKILLS: you select CATEGORIES only. Individual skill items within "
+    "categories are filtered separately — do not try to list individual skills."
+)
 
 
 def _build_selection_prompt(
@@ -41,6 +65,7 @@ def _build_selection_prompt(
     requirements: dict,
     instructions: str,
     template_sections: list[str],
+    jd_text: str = "",
 ) -> str:
     """Build the user prompt for the LLM selection call.
 
@@ -51,6 +76,7 @@ def _build_selection_prompt(
         instructions: Tailoring instructions text (from ChromaDB or file).
         template_sections: List of template marker names
             (e.g. ['HEADER', 'EDUCATION', ...]).
+        jd_text: The raw job description text for evaluating conditional rules.
 
     Returns:
         The full user prompt string.
@@ -66,14 +92,34 @@ def _build_selection_prompt(
     if email_instructions:
         email_context = f"\nEMAIL/APPLICATION INSTRUCTIONS FROM JD: {email_instructions}"
 
+    jd_context = ""
+    if jd_text:
+        # Truncate very long JDs to avoid token waste
+        truncated = jd_text[:3000] if len(jd_text) > 3000 else jd_text
+        jd_context = f"""
+
+═══════════════════════════════════════════════════════════════════
+FULL JOB DESCRIPTION (for evaluating conditional rules like "if not
+mentioned in the JD" or "if not relevant to the particular JD"):
+═══════════════════════════════════════════════════════════════════
+{truncated}
+═══════════════════════════════════════════════════════════════════
+END OF JOB DESCRIPTION
+═══════════════════════════════════════════════════════════════════"""
+
     return f"""\
 TARGET ROLE: {role}
 TARGET COMPANY: {company}
 KEY SKILLS REQUIRED: {skills_text}
 {email_context}
 
-TAILORING INSTRUCTIONS:
+═══════════════════════════════════════════════════════
+MANDATORY USER RULES (HIGHEST PRIORITY — override your own judgement):
+═══════════════════════════════════════════════════════
 {instructions}
+═══════════════════════════════════════════════════════
+END OF MANDATORY RULES — every rule above MUST be followed literally.
+═══════════════════════════════════════════════════════
 
 AVAILABLE TEMPLATE SECTIONS (these are the sections in the resume template):
 {', '.join(template_sections)}
@@ -91,6 +137,7 @@ Return a JSON object with EXACTLY this structure:
         "EXPERIENCE": ["<exact name from inventory>" or true to include all],
         "PROJECTS": ["<exact project name 1>", "<exact project name 2>", ...],
         "SKILLS": true,
+        "skill_categories_to_include": ["<category name 1>", "<category name 2>", ...],
         "CERTIFICATIONS": ["<exact cert name 1>", ...] or true for all,
         "LEADERSHIP": ["<exact entry name 1>", ...] or true for all
     }},
@@ -102,7 +149,16 @@ Return a JSON object with EXACTLY this structure:
 IMPORTANT:
 - HEADER is ALWAYS true (contains personal details).
 - EDUCATION is ALWAYS true.
-- SKILLS is ALWAYS true.
+- SKILLS is ALWAYS true (the section is always included).
+- Your real job for Skills is the "skill_categories_to_include" list:
+  1. SELECT which skill categories to include — choose categories most relevant to the role.
+  2. ORDER them by relevance — most relevant category first.
+  3. Always include "Programming" and "Soft Skills" (if they exist in the inventory),
+     but place them at the BOTTOM of the list (they are foundational, not differentiating).
+  4. Follow any skill category rules in the MANDATORY USER RULES above.
+- Item-level filtering (e.g. "do not use Raspberry Pi if not relevant") is handled
+  automatically AFTER your selection — you do NOT need to worry about individual
+  skills within a category. Focus only on which CATEGORIES to include and their ORDER.
 - For PROJECTS: select 3-5 most relevant projects. Order them with the \
 most relevant first.
 - For EXPERIENCE: select relevant entries. If only 1 exists, include it.
@@ -113,16 +169,46 @@ should appear (most relevant first).
 - Every name you list MUST appear exactly as written in the CONTENT \
 INVENTORY above.
 - If a template section (e.g. LEADERSHIP) has no matching content in the \
-inventory, set it to false or an empty list — do NOT invent content."""
+inventory, set it to false or an empty list — do NOT invent content.
+
+FINAL CHECK — before returning your JSON, verify EVERY mandatory user rule:
+- Re-read each rule in MANDATORY USER RULES above.
+- For each "always include" rule: confirm the item IS in your selection.
+- For each "do not include" / "exclude" rule: confirm the item is NOT in your selection.
+- For each ordering rule (e.g. "lead with X"): confirm X is FIRST in the relevant order list.
+- For each conditional rule (e.g. "for AI/ML roles use..."): check if the condition applies to THIS role, and if so, enforce it.
+If ANY rule is violated, fix your JSON before returning it."""
 
 
 def _clean_json_response(raw: str) -> str:
-    """Strip markdown fences and other wrapping from LLM JSON response."""
+    """Strip markdown fences, thinking tags, and other wrapping from LLM JSON response."""
     text = raw.strip()
+    # Remove <think>...</think> blocks (reasoning models like Qwen3, DeepSeek-R1)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = text.strip()
+    # Handle UNCLOSED <think> tags — model may output <think>... with no </think>.
+    # In that case, try to extract JSON from after the reasoning, or from the
+    # entire response if no JSON is found after the tag.
+    if not text or (text.startswith("<think>") and "</think>" not in raw):
+        # Unclosed think tag — try to find JSON object anywhere in the raw text
+        json_match = re.search(r'\{[^{}]*"sections_to_include"[^}]*\}', raw, re.DOTALL)
+        if not json_match:
+            # Broader search: find the last { ... } block
+            json_match = re.search(r'(\{(?:[^{}]|\{[^{}]*\})*\})\s*$', raw, re.DOTALL)
+        if json_match:
+            text = json_match.group(0) if not hasattr(json_match, 'group') else json_match.group(0)
+        else:
+            # No JSON found at all — return empty to trigger retry
+            return ""
     # Remove ```json ... ``` wrapping
     text = re.sub(r"^```(?:json)?\s*\n?", "", text)
     text = re.sub(r"\n?```\s*$", "", text)
     text = text.strip()
+    # If still empty after stripping, try to extract JSON from raw
+    if not text:
+        json_match = re.search(r'(\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\})', raw, re.DOTALL)
+        if json_match:
+            text = json_match.group(1)
     # Fix LaTeX backslash escapes that break JSON parsing.
     # LLMs often copy LaTeX names verbatim (e.g. "TinyML \\& Visual").
     # These are invalid JSON escapes — replace with plain equivalents.
@@ -164,12 +250,22 @@ def _validate_selection(
     """
     sections = selection.get("sections_to_include", {})
 
-    # Force required sections
+    # Force required sections to exactly True (not a list).
+    # The LLM sometimes returns EDUCATION as a list of entries, which
+    # bypasses the TIER 1 template-based assembly (template content is
+    # curated — e.g. college only, no school).  Forcing True ensures
+    # _assemble_section_content uses the template version verbatim.
     for required in ("HEADER", "EDUCATION", "SKILLS"):
-        if not sections.get(required):
-            logger.warning(
-                "LLM omitted required section '%s' — forcing to true", required
-            )
+        if sections.get(required) is not True:
+            if sections.get(required):
+                logger.info(
+                    "LLM returned '%s' as %s — forcing to True for template-based assembly",
+                    required, type(sections[required]).__name__,
+                )
+            else:
+                logger.warning(
+                    "LLM omitted required section '%s' — forcing to true", required
+                )
             sections[required] = True
 
     # Validate list-based selections against inventory names
@@ -245,6 +341,77 @@ def _validate_selection(
         else:
             selection["experience_order"] = []
 
+    # Validate skill_categories_to_include against inventory.
+    # The LLM may place it at the top level OR inside sections_to_include.
+    # Check both locations; prefer sections_to_include if present.
+    skill_cats = sections.get("skill_categories_to_include")
+    if not skill_cats or not isinstance(skill_cats, list):
+        skill_cats = selection.get("skill_categories_to_include")
+    skill_inventory_names = set(inventory.get("SKILLS", {}).get("names", []))
+
+    if not skill_cats or not isinstance(skill_cats, list):
+        # Missing or empty: default to all categories from inventory
+        if skill_inventory_names:
+            selection["skill_categories_to_include"] = list(
+                inventory["SKILLS"]["names"]
+            )
+            logger.warning(
+                "skill_categories_to_include missing or empty — "
+                "defaulting to all %d categories",
+                len(skill_inventory_names),
+            )
+        else:
+            selection["skill_categories_to_include"] = []
+    else:
+        # Validate each category name against inventory
+        cleaned_cats: list[str] = []
+        for cat in skill_cats:
+            if cat in skill_inventory_names:
+                cleaned_cats.append(cat)
+            else:
+                # Try fuzzy match (same pattern as project names)
+                matched = _fuzzy_match(cat, skill_inventory_names)
+                if matched:
+                    logger.warning(
+                        "Skill category '%s' corrected to '%s'", cat, matched
+                    )
+                    cleaned_cats.append(matched)
+                else:
+                    logger.warning(
+                        "LLM hallucinated skill category '%s' — removed", cat
+                    )
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for c in cleaned_cats:
+            if c not in seen:
+                deduped.append(c)
+                seen.add(c)
+        selection["skill_categories_to_include"] = deduped
+
+    # Enforce required skill categories: Programming and Soft Skills
+    # must always be included if they exist in the inventory.
+    # This mirrors the tailoring instructions requirement.
+    _required_skill_cats = {"Programming", "Soft Skills"}
+    current_cats = selection.get("skill_categories_to_include", [])
+    current_cats_lower = {c.lower() for c in current_cats}
+    for req_cat in _required_skill_cats:
+        # Check if already present (case-insensitive)
+        if req_cat.lower() not in current_cats_lower:
+            # Check if it exists in inventory
+            matched = _fuzzy_match(req_cat, skill_inventory_names)
+            if matched:
+                current_cats.append(matched)
+                logger.info(
+                    "Enforcing required skill category '%s' (matched '%s')",
+                    req_cat, matched,
+                )
+    selection["skill_categories_to_include"] = current_cats
+
+    # Store validated skill_categories at top level for _assemble_skills_section
+    # and also inside sections_to_include for consistency
+    sections["skill_categories_to_include"] = selection["skill_categories_to_include"]
+
     return selection
 
 
@@ -258,23 +425,585 @@ def _strip_latex_escapes(text: str) -> str:
 def _fuzzy_match(name: str, valid_names: set[str]) -> str | None:
     """Try to match a slightly wrong name to a valid one.
 
-    Uses simple substring matching — if the LLM's name is a substring of
-    a valid name (or vice versa), return the valid name.
+    Uses multiple strategies:
+    1. Exact match (case-insensitive, LaTeX-escape-insensitive)
+    2. Substring match (either direction)
+    3. First 30 chars match (handles truncation)
+    4. First-word match for multi-word names (e.g. "Cloud & Systems" matches
+       "Cloud & Tools" because both start with "Cloud")
+    5. Significant word overlap (>50% of words match)
+
     Also strips LaTeX escapes before comparing (LLM may return plain & vs \\&).
     """
     name_lower = _strip_latex_escapes(name.lower().strip())
+    # Strip common filler words for word-level matching
+    _FILLER = {"&", "and", "the", "a", "an", "of", "in", "for", "with", "to"}
+    name_words = {w for w in name_lower.split() if w not in _FILLER and len(w) > 1}
+
+    best_match: str | None = None
+    best_score = 0
+
     for valid in valid_names:
         valid_lower = _strip_latex_escapes(valid.lower().strip())
-        # Exact match (case-insensitive, LaTeX-escape-insensitive)
+        # 1. Exact match
         if name_lower == valid_lower:
             return valid
-        # Substring match (either direction)
+        # 2. Substring match (either direction)
         if name_lower in valid_lower or valid_lower in name_lower:
             return valid
-        # First 30 chars match (handles truncation)
+        # 3. First 30 chars match (handles truncation)
         if len(name_lower) > 15 and name_lower[:30] == valid_lower[:30]:
             return valid
+        # 4. First significant word match (for categories like "Cloud & X")
+        valid_words = {w for w in valid_lower.split() if w not in _FILLER and len(w) > 1}
+        if name_words and valid_words:
+            # Check overlap
+            overlap = name_words & valid_words
+            if overlap:
+                # Score: prefer matches with more absolute overlap AND higher ratio.
+                # Use (overlap_count, ratio) as a composite score to break ties.
+                min_size = min(len(name_words), len(valid_words))
+                ratio = len(overlap) / min_size
+                # Composite: absolute overlap count * 10 + ratio (0-1)
+                # This ensures 2 matching words always beats 1 matching word
+                score = len(overlap) * 10 + ratio
+                if score > best_score:
+                    best_score = score
+                    best_match = valid
+
+    # Return best match if at least 1 significant word overlaps
+    # AND the overlap ratio is >= 50%
+    if best_match:
+        valid_lower = _strip_latex_escapes(best_match.lower().strip())
+        valid_words = {w for w in valid_lower.split() if w not in _FILLER and len(w) > 1}
+        overlap = name_words & valid_words
+        min_size = min(len(name_words), len(valid_words))
+        ratio = len(overlap) / min_size if min_size > 0 else 0
+        if ratio >= 0.5:
+            return best_match
     return None
+
+
+
+
+def _enforce_instructions(selection: dict, instructions: str, inventory: dict, requirements: dict | None = None) -> dict:
+    """Post-process the LLM selection to enforce instruction rules that the
+    LLM may have missed. This is a generic safety net — not a replacement
+    for the LLM following the rules.
+
+    Handles:
+    - "lead with X" → force X to position 0 in project_order
+    - "always include X" → ensure X is in the selection (any section)
+    - "do not include X in Y" → remove X from section Y
+    - Cross-section item resolution (e.g. Academic Achievement items
+      referenced in LEADERSHIP instructions)
+    """
+    if not instructions:
+        return selection
+
+    if requirements is None:
+        requirements = {}
+
+    sections = selection.get("sections_to_include", {})
+    project_order = selection.get("project_order", [])
+    experience_order = selection.get("experience_order", [])
+    instructions_lower = instructions.lower()
+
+    # Helper: find an item in any inventory section by fuzzy name match
+    def _find_in_inventory(name_lower: str) -> list[tuple[str, str]]:
+        """Return list of (section_key, exact_name) for items matching name_lower."""
+        results = []
+        for sec_key, sec_data in inventory.items():
+            for item_name in sec_data.get("names", []):
+                if name_lower in item_name.lower() or item_name.lower() in name_lower:
+                    results.append((sec_key, item_name))
+        return results
+
+    # ── Enforce "lead with X" for projects ──
+    # Match patterns like "Lead with CouchHire" or "lead with X project for Y roles"
+    lead_matches = re.findall(
+        r"lead\s+with\s+([A-Za-z0-9][A-Za-z0-9 _\-&]+?)(?:\s+project|\s+for|\s*$|\s*\n)",
+        instructions_lower,
+    )
+    for lead_name in lead_matches:
+        lead_name = lead_name.strip()
+        # Find the matching project in project_order (fuzzy)
+        for i, proj in enumerate(project_order):
+            if lead_name in proj.lower() or proj.lower().startswith(lead_name):
+                if i != 0:
+                    # Move to front
+                    project_order.insert(0, project_order.pop(i))
+                    logger.info(
+                        "Instruction enforcement: moved '%s' to front of project_order",
+                        proj,
+                    )
+                break
+        else:
+            # Project not in project_order — try to add it from inventory
+            matches = _find_in_inventory(lead_name)
+            for sec_key, exact_name in matches:
+                if sec_key == "PROJECTS":
+                    project_order.insert(0, exact_name)
+                    if isinstance(sections.get("PROJECTS"), list):
+                        if exact_name not in sections["PROJECTS"]:
+                            sections["PROJECTS"].insert(0, exact_name)
+                    logger.info(
+                        "Instruction enforcement: added and fronted '%s' in project_order",
+                        exact_name,
+                    )
+                    break
+
+    selection["project_order"] = project_order
+
+    # Also update sections_to_include PROJECTS to match new order
+    if isinstance(sections.get("PROJECTS"), list):
+        sections["PROJECTS"] = list(project_order)
+
+    # ── Generic "always include X" enforcement ──
+    # Parse all "always include" / "always use" rules
+    always_matches = re.finditer(
+        r"always\s+(?:include|use)\s+(?:the\s+)?(.+?)(?:\s*\(|$|\n)",
+        instructions_lower,
+        re.MULTILINE,
+    )
+    for m in always_matches:
+        item_phrase = m.group(1).strip().rstrip(".,;")
+        # Remove trailing context like "except for Quant roles"
+        item_phrase = re.sub(r"\s+except\s+.*$", "", item_phrase)
+        item_phrase = re.sub(r"\s+section$", "", item_phrase)
+
+        # Try to find this item in the inventory
+        inv_matches = _find_in_inventory(item_phrase)
+        for sec_key, exact_name in inv_matches:
+            # Map inventory section to selection section
+            sel_key = sec_key
+            # Common mappings
+            if sec_key == "ACADEMIC_ACHIEVEMENTS":
+                sel_key = "LEADERSHIP"
+
+            current = sections.get(sel_key)
+            if isinstance(current, list):
+                if exact_name not in current:
+                    current.append(exact_name)
+                    sections[sel_key] = current
+                    logger.info(
+                        "Instruction enforcement (always include): added '%s' to %s",
+                        exact_name, sel_key,
+                    )
+            elif current is True:
+                pass  # Already including all
+            elif not current:
+                sections[sel_key] = [exact_name]
+                logger.info(
+                    "Instruction enforcement (always include): created %s with '%s'",
+                    sel_key, exact_name,
+                )
+
+    # ── Section-level "always include" enforcement ──
+    # Handle "always include the X section" rules (e.g. "Always Include
+    # the experience section"). The generic item-level enforcement above
+    # handles items within sections, but this handles the section itself.
+    _section_name_map = {
+        "experience": "EXPERIENCE",
+        "leadership": "LEADERSHIP",
+        "certifications": "CERTIFICATIONS",
+        "projects": "PROJECTS",
+        "skills": "SKILLS",
+        "education": "EDUCATION",
+    }
+    for sec_m in re.finditer(
+        r"always\s+(?:include|use)\s+(?:the\s+)?(\w+)\s+section",
+        instructions_lower,
+        re.MULTILINE,
+    ):
+        sec_phrase = sec_m.group(1).strip().lower()
+        sel_key = _section_name_map.get(sec_phrase)
+        if sel_key and not sections.get(sel_key):
+            sections[sel_key] = True
+            logger.info(
+                "Instruction enforcement (section-level): forced '%s' to True "
+                "(rule: 'always include the %s section')",
+                sel_key, sec_phrase,
+            )
+
+    # ── Generic "do not include X" enforcement ──
+    # Parse "do not include X in Y" / "do not include X"
+    exclude_matches = re.finditer(
+        r"(?:do\s+not|never)\s+(?:include|use)\s+(?:the\s+)?(.+?)(?:\s+in\s+(?:the\s+)?(.+?))?(?:\s*[,.]|\s*\)|$|\n)",
+        instructions_lower,
+        re.MULTILINE,
+    )
+    for m in exclude_matches:
+        item_phrase = m.group(1).strip().rstrip(".,;")
+        target_section = m.group(2).strip().rstrip(".,;") if m.group(2) else None
+
+        # Skip conditional rules here — they need JD context handled by LLM/filter
+        if re.search(r"if\s+(?:not\s+)?(?:relevant|mentioned|it\s+is)", item_phrase):
+            continue
+        if target_section and re.search(r"if\s+(?:not\s+)?(?:relevant|mentioned|it\s+is)", target_section):
+            continue
+
+        # Remove trailing context
+        item_phrase = re.sub(r"\s+(?:instead|except|if\s+).*$", "", item_phrase)
+
+        # Determine which sections to check
+        sections_to_check = []
+        if target_section:
+            # Map common section name variants
+            sec_map = {
+                "leadership": "LEADERSHIP",
+                "leadership and achievements": "LEADERSHIP",
+                "skills": "SKILLS",
+                "skill": "SKILLS",
+                "projects": "PROJECTS",
+                "experience": "EXPERIENCE",
+                "certifications": "CERTIFICATIONS",
+                "education": "EDUCATION",
+            }
+            for key, val in sec_map.items():
+                if key in target_section:
+                    sections_to_check.append(val)
+                    break
+        if not sections_to_check:
+            sections_to_check = list(sections.keys())
+
+        for sec_key in sections_to_check:
+            current = sections.get(sec_key)
+            if isinstance(current, list):
+                cleaned = [
+                    item for item in current
+                    if item_phrase not in item.lower()
+                ]
+                if len(cleaned) != len(current):
+                    sections[sec_key] = cleaned
+                    logger.info(
+                        "Instruction enforcement (exclude): removed items matching "
+                        "'%s' from %s",
+                        item_phrase, sec_key,
+                    )
+
+    # ── Skill category enforcement ──
+    # Handle "do not include X section in Skills if not Y role" rules
+    # and "for X roles use Y" skill category rules
+    skill_cats = selection.get("skill_categories_to_include", [])
+    if skill_cats:
+        skill_inv_names = set(inventory.get("SKILLS", {}).get("names", []))
+
+        # Parse "do not include X ... in ... skills ... if not Y" rules
+        for m in re.finditer(
+            r"do\s+not\s+include\s+(.+?)\s+(?:section\s+)?in\s+(?:the\s+)?"
+            r"skills?\s+(?:section\s+)?if\s+(?:the\s+)?(?:it\s+is\s+)?"
+            r"(not\s+)?(?:a\s+)?(.+?)(?:\s*$|\n)",
+            instructions_lower,
+            re.MULTILINE,
+        ):
+            items_str = m.group(1).strip()
+            condition = m.group(3).strip().rstrip(".,;")
+
+            # Parse category names from the items string
+            cat_names = re.split(r"\s+and\s+|\s*,\s*", items_str)
+
+            # Evaluate the condition against the role
+            role_lower = (requirements.get("role", "") or "").lower()
+            company_lower = (requirements.get("company", "") or "").lower()
+
+            # Generic condition evaluation: extract key terms from the
+            # condition string and check if the role matches or doesn't match.
+            # Handles patterns like:
+            #   "if not a Quant-based role" → exclude unless role contains "quant"
+            #   "if the role is AI/ML related" → include if role contains "ai" or "ml"
+            condition_met = False
+            is_negated = m.group(2) is not None  # regex captured "not" before condition
+
+            # Extract meaningful terms from the condition (strip filler words)
+            _CONDITION_FILLER = {
+                "a", "an", "the", "it", "is", "not", "based", "related",
+                "role", "roles", "type", "position", "job",
+            }
+            condition_terms = [
+                t for t in re.split(r"[\s/,\-]+", condition)
+                if t and t not in _CONDITION_FILLER and len(t) > 1
+            ]
+
+            if condition_terms:
+                # Check if any condition term appears in the role title
+                role_has_term = any(
+                    term in role_lower or term in company_lower
+                    for term in condition_terms
+                )
+                # "if not X role" → condition met when role does NOT have X
+                # "if X role" → condition met when role DOES have X
+                condition_met = (not role_has_term) if is_negated else role_has_term
+
+            if condition_met:
+                for cat_name in cat_names:
+                    cat_name = cat_name.strip().rstrip(".,;")
+                    if not cat_name or len(cat_name) < 3:
+                        continue
+                    # Find matching category in skill_cats (fuzzy)
+                    for i, existing_cat in enumerate(skill_cats):
+                        if cat_name in existing_cat.lower():
+                            removed_cat = skill_cats.pop(i)
+                            logger.info(
+                                "Instruction enforcement (skill category): "
+                                "removed '%s' (condition: %s)",
+                                removed_cat, condition,
+                            )
+                            break
+
+        # Parse "for X roles use Y" skill category rules
+        for m in re.finditer(
+            r"for\s+(?:any\s+)?(.+?)\s+(?:related\s+)?roles?\s+use\s+(.+?)(?:\s*$|\n)",
+            instructions_lower,
+            re.MULTILINE,
+        ):
+            role_types = m.group(1).strip()
+            cat_name = m.group(2).strip().rstrip(".,;")
+
+            # Check if this role matches the condition
+            role_lower = (requirements.get("role", "") or "").lower()
+            role_type_terms = re.split(r"[/,]|\s+", role_types)
+            role_matches = any(
+                term.strip() in role_lower
+                for term in role_type_terms
+                if term.strip() and len(term.strip()) > 1
+            )
+
+            if role_matches:
+                # Find the category in inventory and add if not present
+                for inv_cat in skill_inv_names:
+                    if cat_name in inv_cat.lower() or inv_cat.lower() in cat_name:
+                        if inv_cat not in skill_cats:
+                            skill_cats.append(inv_cat)
+                            logger.info(
+                                "Instruction enforcement (skill category): "
+                                "added '%s' for role type '%s'",
+                                inv_cat, role_types,
+                            )
+                        break
+
+        selection["skill_categories_to_include"] = skill_cats
+        sections["skill_categories_to_include"] = skill_cats
+
+        # ── "instead include X" enforcement ──
+    # Parse rules like "do not include X, instead include Y" or
+    # "do not include X in Z, instead include Y"
+    instead_matches = re.finditer(
+        r"instead\s+(?:include|use)\s+(?:the\s+)?(.+?)(?:\s*\(|\s*[,.]|\s*$|\n)",
+        instructions_lower,
+        re.MULTILINE,
+    )
+    for m in instead_matches:
+        item_phrase = m.group(1).strip().rstrip(".,;")
+        # Remove trailing context
+        item_phrase = re.sub(r"\s+(?:except|if\s+|for\s+).*$", "", item_phrase)
+        # Remove "/ Merit Scholarship" style alternatives — handle each part
+        alt_items = re.split(r"\s*/\s*", item_phrase)
+
+        for alt in alt_items:
+            alt = alt.strip()
+            if not alt or len(alt) < 3:
+                continue
+
+            inv_matches = _find_in_inventory(alt)
+            for sec_key, exact_name in inv_matches:
+                sel_key = sec_key
+                if sec_key == "ACADEMIC_ACHIEVEMENTS":
+                    sel_key = "LEADERSHIP"
+
+                current = sections.get(sel_key)
+                if isinstance(current, list):
+                    if exact_name not in current:
+                        current.append(exact_name)
+                        sections[sel_key] = current
+                        logger.info(
+                            "Instruction enforcement (instead include): "
+                            "added '%s' to %s",
+                            exact_name, sel_key,
+                        )
+                elif current is True:
+                    pass
+                elif not current:
+                    sections[sel_key] = [exact_name]
+                    logger.info(
+                        "Instruction enforcement (instead include): "
+                        "created %s with '%s'",
+                        sel_key, exact_name,
+                    )
+
+    # ── Cross-section resolution: Academic Achievement items in LEADERSHIP ──
+    # If instructions mention "Certificate of Merit" or "Merit Scholarship"
+    # in the Leadership context, and there's an ACADEMIC_ACHIEVEMENTS section
+    # in the inventory, pull matching items into the LEADERSHIP selection.
+    if any(term in instructions_lower for term in [
+        "certificate of merit", "merit scholarship", "merit scholarships"
+    ]):
+        leadership = sections.get("LEADERSHIP", [])
+        if isinstance(leadership, list):
+            # Check if already present
+            has_merit = any(
+                "merit" in item.lower() for item in leadership
+            )
+            if not has_merit:
+                # Look in ACADEMIC_ACHIEVEMENTS inventory
+                acad_names = inventory.get("ACADEMIC_ACHIEVEMENTS", {}).get("names", [])
+                for acad_name in acad_names:
+                    if "merit" in acad_name.lower():
+                        leadership.append(acad_name)
+                        logger.info(
+                            "Instruction enforcement: added '%s' from "
+                            "ACADEMIC_ACHIEVEMENTS to LEADERSHIP",
+                            acad_name,
+                        )
+                        break
+                # Also check all inventory sections for merit items
+                if not any("merit" in item.lower() for item in leadership):
+                    for sec_key, sec_data in inventory.items():
+                        for item_name in sec_data.get("names", []):
+                            if "merit" in item_name.lower():
+                                leadership.append(item_name)
+                                logger.info(
+                                    "Instruction enforcement: added '%s' from "
+                                    "%s to LEADERSHIP",
+                                    item_name, sec_key,
+                                )
+                                break
+                        if any("merit" in item.lower() for item in leadership):
+                            break
+                sections["LEADERSHIP"] = leadership
+
+    selection["sections_to_include"] = sections
+    return selection
+
+
+
+def _verify_and_fix_selection(
+    selection: dict,
+    instructions: str,
+    requirements: dict,
+    inventory: dict[str, dict],
+    inventory_text: str,
+    jd_text: str = "",
+) -> dict:
+    """Ask the LLM to verify the selection against every instruction rule.
+
+    This is a second LLM call that acts as a self-check. It receives the
+    current selection JSON and the full instructions, and returns a corrected
+    JSON if any rules are violated.
+
+    This catches issues that _enforce_instructions (regex-based) cannot handle,
+    like conditional rules, role-type-dependent rules, and complex multi-part rules.
+    """
+    from llm.client import complete
+
+    if not instructions:
+        return selection
+
+    role = requirements.get("role", "Unknown")
+    company = requirements.get("company", "Unknown")
+
+    current_json = json.dumps(selection, indent=2)
+
+    jd_snippet = ""
+    if jd_text:
+        truncated = jd_text[:2000] if len(jd_text) > 2000 else jd_text
+        jd_snippet = f"""
+JOB DESCRIPTION (for evaluating conditional rules):
+{truncated}
+"""
+
+    verify_prompt = f"""You are a strict compliance auditor for resume content selection.
+
+TARGET ROLE: {role}
+TARGET COMPANY: {company}
+{jd_snippet}
+MANDATORY USER RULES (each one MUST be followed):
+═══════════════════════════════════════════════════
+{instructions}
+═══════════════════════════════════════════════════
+
+AVAILABLE CONTENT INVENTORY:
+{inventory_text}
+
+CURRENT SELECTION (to verify):
+```json
+{current_json}
+```
+
+YOUR TASK:
+1. Read EVERY mandatory rule above, one by one.
+2. For each rule, check if the current selection complies.
+3. Pay special attention to:
+   - Conditional rules: Does the condition apply to "{role}" at "{company}"?
+   - "Always include X" rules: Is X actually in the selection?
+   - "Do not include Y" rules: Is Y absent from the selection?
+   - Ordering rules: Is the order correct?
+   - Skill category rules: Are the right categories included/excluded?
+4. If ALL rules are satisfied, return the selection JSON unchanged.
+5. If ANY rule is violated, fix the JSON and return the corrected version.
+
+IMPORTANT:
+- Only use EXACT names from the CONTENT INVENTORY.
+- Keep the same JSON structure as the input.
+- If you add items, they MUST exist in the inventory.
+- Preserve all existing correct selections — only fix violations.
+
+Return ONLY the (possibly corrected) JSON. No commentary, no markdown fences."""
+
+    verify_system = (
+        "You are a compliance checker. Return valid JSON only. "
+        "Fix any rule violations in the selection. "
+        "If no violations, return the input JSON unchanged."
+    )
+
+    try:
+        raw = complete(verify_prompt, system_prompt=verify_system)
+        cleaned = _clean_json_response(raw)
+        verified = json.loads(cleaned)
+
+        if not isinstance(verified, dict) or "sections_to_include" not in verified:
+            logger.warning(
+                "Verification LLM returned invalid structure — keeping original"
+            )
+            return selection
+
+        # Re-validate the verified selection
+        verified = _validate_selection(verified, inventory)
+        verified = _enforce_instructions(verified, instructions, inventory, requirements)
+
+        # Log any changes
+        orig_projects = selection.get("project_order", [])
+        new_projects = verified.get("project_order", [])
+        if orig_projects != new_projects:
+            logger.info(
+                "Verification changed project_order: %s → %s",
+                orig_projects, new_projects,
+            )
+
+        orig_leadership = selection.get("sections_to_include", {}).get("LEADERSHIP", [])
+        new_leadership = verified.get("sections_to_include", {}).get("LEADERSHIP", [])
+        if orig_leadership != new_leadership:
+            logger.info(
+                "Verification changed LEADERSHIP: %s → %s",
+                orig_leadership, new_leadership,
+            )
+
+        orig_skills = selection.get("skill_categories_to_include", [])
+        new_skills = verified.get("skill_categories_to_include", [])
+        if orig_skills != new_skills:
+            logger.info(
+                "Verification changed skill_categories: %s → %s",
+                orig_skills, new_skills,
+            )
+
+        return verified
+
+    except (json.JSONDecodeError, Exception) as exc:
+        logger.warning(
+            "Verification LLM call failed (%s) — keeping original selection",
+            exc,
+        )
+        return selection
 
 
 def select_content(
@@ -283,6 +1012,7 @@ def select_content(
     requirements: dict,
     instructions: str,
     template_sections: list[str],
+    jd_text: str = "",
 ) -> dict:
     """Ask the LLM to select which CV content to include in the tailored resume.
 
@@ -313,12 +1043,19 @@ def select_content(
         requirements=requirements,
         instructions=instructions,
         template_sections=template_sections,
+        jd_text=jd_text,
     )
 
-    # Try up to 2 times — LLMs occasionally return malformed JSON
+    # Try up to 3 times — LLMs occasionally return malformed JSON or get rate-limited
+    import time as _time
     last_error: Exception | None = None
-    for attempt in range(1, 3):
-        logger.info("LLM selection call (attempt %d/2)", attempt)
+    for attempt in range(1, 4):
+        logger.info("LLM selection call (attempt %d/3)", attempt)
+        if attempt > 1:
+            # Wait between retries to avoid rate limits (exponential backoff)
+            delay = 5 * (attempt - 1)
+            logger.info("Waiting %ds before retry (rate limit backoff)", delay)
+            _time.sleep(delay)
 
         raw_response = complete(prompt, system_prompt=_SYSTEM_PROMPT)
         cleaned = _clean_json_response(raw_response)
@@ -355,6 +1092,21 @@ def select_content(
         # Validate and sanitise
         validated = _validate_selection(selection, inventory)
 
+        # Verification pass: ask LLM to check compliance with every rule
+        # (runs _validate + _enforce internally as a first pass)
+        validated = _verify_and_fix_selection(
+            selection=validated,
+            instructions=instructions,
+            requirements=requirements,
+            inventory=inventory,
+            inventory_text=inventory_text,
+            jd_text=jd_text,
+        )
+
+        # FINAL enforcement: regex-based rules get the last word.
+        # This catches anything the verification LLM missed or undid.
+        validated = _enforce_instructions(validated, instructions, inventory, requirements)
+
         logger.info(
             "LLM selection validated — sections: %s, projects: %s",
             {
@@ -366,8 +1118,8 @@ def select_content(
 
         return validated
 
-    # Both attempts failed
+    # All attempts failed
     raise RuntimeError(
-        f"LLM failed to return valid selection JSON after 2 attempts. "
+        f"LLM failed to return valid selection JSON after 3 attempts. "
         f"Last error: {last_error}"
     )

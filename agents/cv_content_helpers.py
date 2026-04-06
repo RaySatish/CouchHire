@@ -633,12 +633,33 @@ def _summarise_certification(name: str, block_latex: str) -> str:
 def _summarise_skills(section_latex: str) -> list[str]:
     """Extract skill categories and their contents as plain text."""
     summaries = []
-    for match in re.finditer(r"\\textbf\{([^}]+):\}\s*([^\n]+)", section_latex):
-        category = match.group(1).strip()
-        skills = match.group(2).strip()
+    # Use extract_skill_categories for accurate parsing (handles spaces,
+    # multi-category lines like Programming \hfill Soft Skills)
+    categories = extract_skill_categories(section_latex)
+    for category, block in categories.items():
+        if category == "full_skills":
+            # Fallback — no categories detected, skip
+            continue
+        # Extract the content after the category header
+        # Pattern: \textbf{Category: } content...
+        match = re.search(
+            r"\\textbf\{" + re.escape(category) + r"\s*:\s*\}\s*(.*)",
+            block,
+            re.DOTALL,
+        )
+        if match:
+            skills = match.group(1).strip()
+        else:
+            skills = block
+        # Clean LaTeX commands
         skills = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", skills)
         skills = re.sub(r"\\\\", "", skills).strip()
-        summaries.append(f"{category}: {skills}")
+        # Remove \hfill and anything after it (for shared-line categories)
+        skills = re.sub(r"\s*\\hfill.*$", "", skills).strip()
+        # Clean trailing commas
+        skills = skills.rstrip(",").strip()
+        if skills:
+            summaries.append(f"{category}: {skills}")
     return summaries
 
 
@@ -806,10 +827,12 @@ def extract_skill_categories(section_latex: str) -> dict[str, str]:
     lines = section_latex.split("\n")
 
     # Find lines that start a skill category: \textbf{Something:}
+    # Also handles \textbf{Something: } (space before closing brace)
+    # and multiple categories on the same line (e.g. Programming \hfill Soft Skills)
     category_starts: list[tuple[int, str]] = []
     for i, line in enumerate(lines):
-        match = re.search(r"\\textbf\{([^}]+):\}", line)
-        if match:
+        # Find ALL \textbf{Name:} or \textbf{Name: } patterns on this line
+        for match in re.finditer(r"\\textbf\{([^}]+?)\s*:\s*\}", line):
             category_starts.append((i, match.group(1).strip()))
 
     if not category_starts:
@@ -828,7 +851,57 @@ def extract_skill_categories(section_latex: str) -> dict[str, str]:
             if idx + 1 < len(category_starts)
             else len(lines)
         )
-        block = "\n".join(lines[start_line:end_line]).rstrip()
+
+        # Handle multiple categories on the same line (e.g. Programming \hfill Soft Skills)
+        next_same_line = (
+            idx + 1 < len(category_starts)
+            and category_starts[idx + 1][0] == start_line
+        )
+
+        if next_same_line:
+            # Split the shared line at the \hfill or \textbf boundary for the NEXT category
+            line = lines[start_line]
+            next_cat_name = category_starts[idx + 1][1]
+            # Find where the next category's \textbf starts
+            split_pattern = r"\\hfill\s*\\textbf\{" + re.escape(next_cat_name)
+            split_match = re.search(split_pattern, line)
+            if split_match:
+                block = line[:split_match.start()].rstrip()
+            else:
+                # Fallback: split at \hfill
+                hfill_pos = line.find(r"\hfill")
+                if hfill_pos > 0:
+                    block = line[:hfill_pos].rstrip()
+                else:
+                    block = line
+        elif (
+            idx > 0
+            and category_starts[idx - 1][0] == start_line
+        ):
+            # This is the SECOND category on a shared line — extract from \hfill onwards
+            line = lines[start_line]
+            # Find this category's \textbf start
+            cat_pattern = r"\\textbf\{" + re.escape(cat_name) + r"\s*:\s*\}"
+            cat_match = re.search(cat_pattern, line)
+            if cat_match:
+                # Build a proper \item line from the extracted portion
+                extracted = line[cat_match.start():].rstrip()
+                # Ensure it starts with \item if the original line had it
+                if r"\item" in line[:cat_match.start()] and r"\item" not in extracted:
+                    extracted = r"    \item " + extracted
+                block = extracted
+            else:
+                block = "\n".join(lines[start_line:end_line]).rstrip()
+        else:
+            block = "\n".join(lines[start_line:end_line]).rstrip()
+
+        # Clean any container-closing commands that may have been captured
+        # in the last category (e.g. \end{itemize}, \end{tabularx})
+        block = re.sub(
+            r'\s*\\end\{(?:itemize|enumerate|tabularx|tabular)\}\s*',
+            '',
+            block,
+        ).rstrip()
         blocks[cat_name] = block
 
     return blocks
