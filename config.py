@@ -97,7 +97,7 @@ _raw_threshold = _env("MATCH_THRESHOLD")
 MATCH_THRESHOLD: int = int(_raw_threshold) if _raw_threshold is not None else 60
 
 # ---------------------------------------------------------------------------
-# Optional variables (not validated — used by setup scripts only)
+# Optional variables (not validated — sensible defaults)
 # ---------------------------------------------------------------------------
 
 # Direct Postgres connection string — used ONLY by db/create_tables.py.
@@ -108,6 +108,27 @@ SUPABASE_DB_URL: str | None = _env("SUPABASE_DB_URL")
 # a fallback when direct Postgres connection fails.
 # Generate at: https://supabase.com/dashboard/account/tokens
 SUPABASE_ACCESS_TOKEN: str | None = _env("SUPABASE_ACCESS_TOKEN")
+
+# ---------------------------------------------------------------------------
+# Optional variables — browser agent / ATS form filling
+# ---------------------------------------------------------------------------
+
+# Chrome DevTools Protocol port for browser agent sessions.
+# Default 9222 — only change if that port is already in use.
+_raw_cdp_port = _env("CDP_PORT")
+CDP_PORT: int = int(_raw_cdp_port) if _raw_cdp_port is not None else 9222
+
+# Applicant contact info — used to pre-fill ATS form fields.
+APPLICANT_PHONE: str | None = _env("APPLICANT_PHONE")
+APPLICANT_LINKEDIN: str | None = _env("APPLICANT_LINKEDIN")
+
+# Path to persistent answer memory for ATS form fields.
+# Defaults to cv/uploads/form_answers.json (gitignored).
+_raw_form_answers = _env("FORM_ANSWERS_PATH")
+FORM_ANSWERS_PATH: Path = (
+    Path(_raw_form_answers) if _raw_form_answers is not None
+    else _PROJECT_ROOT / "cv" / "uploads" / "form_answers.json"
+)
 
 # ---------------------------------------------------------------------------
 # Validation — runs on import

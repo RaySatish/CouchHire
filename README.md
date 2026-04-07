@@ -36,7 +36,7 @@ CouchHire is a fully agentic job application pipeline. Paste a job description, 
 4. The Match Scorer computes a fit percentage using sentence-transformers. If below the configured threshold, the job is skipped or flagged.
 5. If the match passes, three agents run in parallel: Resume Tailor (compiles a tailored PDF via pdflatex), Cover Letter (if required), and Email Drafter.
 6. A Telegram notification arrives with a summary card — company, role, match %, apply route — and Approve / Edit buttons.
-7. On approval, the Apply Router detects the method: Gmail MCP for email, Playwright for ATS forms, or a live handoff alert for CAPTCHAs.
+7. On approval, the Apply Router detects the method: Gmail MCP for email drafts, semi-autonomous browser agent for ATS forms (with LLM-assisted field mapping and human-in-the-loop interrupts), or a manual-apply alert.
 8. The application is logged in Supabase. You later tap an outcome button in Telegram (No Reply / Screening / Interview / Rejected / Offer).
 9. Every 10 new outcome labels, the match scorer automatically retrains on your personal history.
 
@@ -53,7 +53,7 @@ CouchHire is a fully agentic job application pipeline. Paste a job description, 
 | Database | Supabase (PostgreSQL) | Applications table, outcome labels, retraining data |
 | Job search | Indeed MCP | Proactive job pulls into the pipeline |
 | Email drafts | Gmail MCP | Creates Gmail draft with resume PDF attachment (never auto-sends) |
-| Browser automation | Playwright | ATS form filling, Chrome DevTools Protocol for live session handoff |
+| Browser automation | Playwright | Semi-autonomous ATS form filling via CDP (`connect_over_cdp()`), LLM-assisted field mapping, human-in-the-loop interrupt system via Telegram |
 | Notifications + review | Telegram bot (python-telegram-bot) | Approve / edit / label outcomes from your phone |
 | Dashboard | Streamlit | Application tracker, analytics, retrain controls, settings |
 | Resume compiler | pdflatex (local) | Compiles tailored .tex → PDF on the user's machine |
@@ -77,8 +77,8 @@ couchhire/
 │   └── apply_router.py       # Detects email / form / manual route → route string
 ├── apply/
 │   ├── gmail_sender.py       # Gmail MCP integration → sends email with PDF attachment
-│   ├── browser_agent.py      # Playwright ATS form filling
-│   └── session_handoff.py    # Live browser session handoff via Chrome DevTools Protocol
+│   ├── browser_agent.py      # Semi-autonomous ATS form filler (LLM field mapping + blocker detection + Telegram interrupts)
+│   └── session_handoff.py    # CDP session manager (launches Chromium with --remote-debugging-port for Playwright + manual takeover)
 ├── bot/
 │   └── telegram_bot.py       # Inbound/outbound Telegram notifications and buttons
 ├── dashboard/
@@ -179,14 +179,23 @@ This section is intentionally precise so that each module has a clear contract. 
 - **No LLM call**
 
 ### `apply/browser_agent.py`
-- **Input:** `apply_target` (URL), all generated documents
-- **Action:** Playwright fills ATS form fields (name, email, resume upload, cover letter, LinkedIn, GitHub)
-- **On CAPTCHA:** pauses, calls `session_handoff.py`, sends Telegram alert
-- **Runs non-headless** so manual takeover is possible
+- **Input:** `apply_target` (URL), all generated documents (resume PDF, cover letter, applicant data)
+- **Action:** Semi-autonomous ATS form filler with LLM-assisted field mapping
+- For each form page: extracts visible text + field labels → sends to LLM → gets field mapping → fills fields
+- **On any blocker** (missing field, validation error, CAPTCHA, unknown UI):
+  - Takes screenshot → sends to Telegram with context
+  - **Simple blockers:** user replies with text → agent fills and continues (answer stored in `form_answers.json` for future reuse)
+  - **Complex blockers:** user takes over browser via CDP (`chrome://inspect` → `localhost:9222`), taps `[Done]` → agent resumes
+- Uses `threading.Event()` for pause/resume — no Redis or external state store
+- **No LLM call for form filling logic** — LLM is used only for field mapping (via `llm/client.py`)
 
 ### `apply/session_handoff.py`
-- **Action:** exposes existing Playwright browser session via Chrome DevTools Protocol for manual control
-- **Telegram:** sends alert with [Done] button; on tap, pipeline resumes logging
+- **Action:** CDP session manager — launches Chromium with `--remote-debugging-port=9222`
+- `launch_browser(session_id)` — starts Chromium with CDP enabled
+- `get_cdp_url()` — returns the CDP WebSocket URL for Playwright's `connect_over_cdp()`
+- `get_takeover_instructions()` — returns human-readable instructions for user to connect via `chrome://inspect`
+- `close_browser()` — cleanup
+- Does NOT depend on Telegram bot — pure browser lifecycle management
 
 ### `bot/telegram_bot.py`
 - **Outbound messages:** new job card, manual takeover alert, send confirmation, daily digest
@@ -254,8 +263,8 @@ telegram_bot.py — notification card
   ▼            ▼
 Re-run     apply_router.py
 generator  → route = "email"   → gmail_sender.py (Gmail MCP)
-agents     → route = "form"    → browser_agent.py (Playwright)
-           → route = "manual"  → session_handoff.py → Telegram alert
+agents     → route = "form"    → browser_agent.py (LLM-assisted form fill + human-in-the-loop)
+           → route = "manual"  → Telegram alert (apply manually)
                                  → you take over → tap [Done] → pipeline resumes
         │
         ▼
@@ -453,6 +462,14 @@ Jobs with a match score below this value are skipped automatically. Lower it to 
 GITHUB_URL=https://github.com/your-username
 ```
 This is automatically included in every email draft.
+
+**Browser agent variables (optional):**
+```
+APPLICANT_PHONE=+91 9800155779    # for ATS form fields
+APPLICANT_LINKEDIN=https://linkedin.com/in/your-profile
+FORM_ANSWERS_PATH=cv/uploads/form_answers.json  # default, override if needed
+CDP_PORT=9222                     # Chrome DevTools Protocol port, default 9222
+```
 
 The full list of variables is in `.env.example` with a comment explaining each one.
 
@@ -655,8 +672,8 @@ Available at http://localhost:8501 once running.
 - [x] Core pipeline (JD parser → resume tailor → email drafter)
 - [ ] Telegram bot (notifications + approval buttons)
 - [ ] Gmail MCP integration (Step 16 — next)
-- [ ] Playwright form filling
-- [ ] Manual takeover session handoff
+- [ ] Semi-autonomous browser agent (LLM-assisted ATS form filling + human-in-the-loop)
+- [ ] CDP session management for browser takeover
 - [x] Supabase logging
 - [ ] Streamlit dashboard
 - [x] NLP match scorer + retraining loop
