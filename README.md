@@ -208,9 +208,12 @@ This section is intentionally precise so that each module has a clear contract. 
 - Exposes: `insert_application()`, `update_status()`, `get_all_applications()`, `get_labeled_outcomes()`
 
 ### `nlp/retrain.py`
-- **Trigger:** called automatically when count of new outcome labels since last retrain reaches 10
-- **Input:** fetches `(jd_embedding, cv_embedding, outcome)` rows from Supabase
-- **Output:** new match scorer model replaces old if validation accuracy improves
+- **Trigger:** called automatically (via background thread in Telegram bot) when `should_retrain()` returns True — every `RETRAIN_EVERY` new outcome labels once `MIN_RETRAIN_LABELS` threshold is met
+- **Input:** fetches labeled rows from Supabase (`jd_text`, `resume_content`, `outcome`); filters out `withdrawn` and rows missing either text field
+- **Training:** builds `InputExample` pairs with `CosineSimilarityLoss` — outcome → label: `offer=1.0`, `interview=0.8`, `no_response=0.25`, `rejected=0.1`; oversamples positives if negative:positive ratio exceeds 3:1; adaptive epochs (8/5/3/2) based on dataset size
+- **Model:** always retrains from `0xnbk/nbk-ats-semantic-v1-en` base (never incremental fine-tuning); saved to `nlp/models/match_scorer_finetuned/` (gitignored)
+- **Output:** `match_scorer.py` auto-loads the fine-tuned model on next call via `reload_model()`
+- **Public API:** `retrain(force=False) -> dict`, `should_retrain() -> bool`
 
 ### `llm/client.py`
 - Single function: `complete(prompt, system_prompt=None, max_tokens=None) → str`
@@ -222,7 +225,7 @@ This section is intentionally precise so that each module has a clear contract. 
 ### `config.py`
 - Loads `.env` via `python-dotenv`
 - **Validates all required keys on import** — raises a clear error listing every missing variable before anything else runs
-- Exposes constants: `LLM_PROVIDER`, `MATCH_THRESHOLD`, `SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GITHUB_URL`
+- Exposes constants: `LLM_PROVIDER`, `MATCH_THRESHOLD`, `SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GITHUB_URL`, `MIN_RETRAIN_LABELS`, `RETRAIN_EVERY`, `FINETUNED_MODEL_DIR`
 
 ---
 
@@ -471,6 +474,13 @@ FORM_ANSWERS_PATH=cv/uploads/form_answers.json  # default, override if needed
 CDP_PORT=9222                     # Chrome DevTools Protocol port, default 9222
 ```
 
+**NLP retraining variables (optional):**
+```
+MIN_RETRAIN_LABELS=10              # minimum labeled outcomes before retraining is allowed
+RETRAIN_EVERY=10                   # auto-retrain every N new labels (0 = manual only)
+```
+These control the auto-retrain trigger. With defaults, retraining fires when you have at least 10 labels and every 10 new labels after that. Set `RETRAIN_EVERY=0` to disable auto-retrain and use the dashboard Retrain button instead.
+
 The full list of variables is in `.env.example` with a comment explaining each one.
 
 ---
@@ -645,10 +655,11 @@ CouchHire gets better at predicting which jobs are worth applying for the more y
 2. You receive a response from the employer → open Telegram → tap the outcome button for that application
 3. Available labels: **No Reply**, **Screening**, **Interview**, **Rejected**, **Offer**
 4. The label is written to Supabase
-5. Every 10 new labels, `nlp/retrain.py` fires automatically
-6. The match scorer retrains on your personal `(jd_embedding, cv_embedding, outcome)` history
-7. The new model replaces the old one only if its validation accuracy is higher
-8. From that point forward, the pipeline uses the improved model
+5. Every `RETRAIN_EVERY` new labels (default: 10), `nlp/retrain.py` fires automatically in a background thread
+6. The scorer fine-tunes on your personal `(jd_text, resume_content, outcome)` pairs using `CosineSimilarityLoss` — outcomes map to similarity targets (offer=1.0, interview=0.8, no_response=0.25, rejected=0.1)
+7. Class imbalance is handled by oversampling positives to keep the negative:positive ratio at most 3:1
+8. The fine-tuned model is saved to `nlp/models/match_scorer_finetuned/` and loaded automatically on the next pipeline run
+9. From that point forward, the pipeline uses your personalised model
 
 The more you label, the more personalised the scoring becomes to your actual experience and the roles that respond to you.
 
@@ -670,13 +681,13 @@ Available at http://localhost:8501 once running.
 ## Roadmap
 
 - [x] Core pipeline (JD parser → resume tailor → email drafter)
-- [ ] Telegram bot (notifications + approval buttons)
+- [x] Telegram bot (notifications + approval buttons + /outcome command + auto-retrain hook)
 - [ ] Gmail MCP integration (Step 16 — next)
 - [ ] Semi-autonomous browser agent (LLM-assisted ATS form filling + human-in-the-loop)
 - [ ] CDP session management for browser takeover
 - [x] Supabase logging
 - [ ] Streamlit dashboard
-- [x] NLP match scorer + retraining loop
+- [x] NLP match scorer + self-improving retraining loop (CosineSimilarityLoss, outcome labels, class balancing)
 - [ ] Indeed MCP job pulls
 - [x] LiteLLM multi-provider support
 - [ ] Docker support
