@@ -2,7 +2,7 @@
 
 Navigates to an ATS application URL, extracts form fields, uses an LLM to
 map them to applicant data, fills them in, and handles blockers via a
-human-in-the-loop interrupt system (Telegram stubs for now).
+human-in-the-loop interrupt system via Telegram.
 
 Public API:
     fill_form(url, documents) -> dict  — fill an ATS form, return result
@@ -602,14 +602,23 @@ def _handle_blocker(blocker: dict, page, session_id: str) -> str:
                                 field_label, exc,
                             )
 
-        # Not in memory — ask the user
-        # STUB: Replace with telegram_bot.send_photo(screenshot) + send_message(question) in Step 19
-        print(f"\n🚫 BLOCKER: {blocker_type} — {details}")
-        print(f"   Screenshot: {screenshot_path}")
+        # Not in memory — ask the user via Telegram
+        from bot.telegram_bot import ask_user
+
+        question = f"🚫 <b>BLOCKER:</b> {blocker_type}\n{details}"
         if field_label:
-            print(f"   Field: {field_label}")
-        # STUB: Replace with threading.Event().wait() in Step 19
-        response = input("   Enter value (or 'takeover' for manual control): ").strip()
+            question += (
+                f"\n\n<b>Field:</b> {field_label}\n"
+                "Reply with the value to fill, or type <code>takeover</code> for manual control."
+            )
+        else:
+            question += "\n\nReply with the value, or type <code>takeover</code> for manual control."
+
+        response = ask_user(question, screenshot_path=screenshot_path if screenshot_path else None)
+
+        if response == "__timeout__":
+            logger.warning("Telegram response timed out for blocker: %s", details)
+            return _handle_complex_blocker(blocker, session_id)
 
         if response.lower() == "takeover":
             # Fall through to complex handler
@@ -634,22 +643,18 @@ def _handle_blocker(blocker: dict, page, session_id: str) -> str:
 
 def _handle_complex_blocker(blocker: dict, session_id: str) -> str:
     """Handle a complex blocker that requires manual CDP takeover."""
-    from apply.session_handoff import get_takeover_instructions
-
     blocker_type = blocker.get("type", "unknown")
     details = blocker.get("details", "")
     screenshot_path = blocker.get("screenshot_path", "")
 
-    # STUB: Replace with telegram_bot.send_photo(screenshot) + send_takeover_instructions() in Step 19
-    print(f"\n⚠️  COMPLEX BLOCKER: {blocker_type} — {details}")
-    print(f"   Screenshot: {screenshot_path}")
-    try:
-        instructions = get_takeover_instructions(session_id)
-        print(f"\n{instructions}")
-    except RuntimeError as exc:
-        print(f"   (Could not get takeover instructions: {exc})")
-    # STUB: Replace with threading.Event().wait() in Step 19
-    input("   Press Enter when you've resolved the issue manually...")
+    from bot.telegram_bot import send_takeover_instructions, ask_yes_no
+
+    send_takeover_instructions(session_id, screenshot_path=screenshot_path if screenshot_path else None)
+
+    # Block until user taps "Done" or replies
+    resolved = ask_yes_no("Have you resolved the issue? Tap ✅ when ready to continue.")
+    if not resolved:
+        logger.warning("User did not confirm resolution for blocker: %s", details)
     return "resolved_manually"
 
 
@@ -739,9 +744,10 @@ def fill_form(url: str, documents: dict) -> dict:
                 logger.info("Blocker resolved: %s", resolution)
                 if resolution == "resolved_manually":
                     # User took over via CDP — check if they want to continue or hand back
-                    # STUB: Replace with Telegram "Are you done?" prompt in Step 19
-                    hand_back = input("Did you finish the form manually? (yes/no): ")
-                    if hand_back.strip().lower() == "yes":
+                    from bot.telegram_bot import ask_yes_no
+
+                    hand_back = ask_yes_no("Did you finish the form manually?")
+                    if hand_back:
                         status = "handed_off"
                         final_url = page.url
                         notes = (
@@ -776,11 +782,10 @@ def fill_form(url: str, documents: dict) -> dict:
                 if submit_btn.is_visible(timeout=2000):
                     # DON'T auto-submit — flag for user confirmation
                     logger.info("Submit button found. NOT auto-submitting.")
-                    # STUB: Replace with telegram_bot.send_message("Ready to submit?") in Step 19
-                    print("\n⚠️  Submit button found. Review the form.")
-                    # STUB: Replace with threading.Event().wait() in Step 19
-                    confirm = input("   Type 'submit' to submit, anything else to skip: ")
-                    if confirm.strip().lower() == "submit":
+                    from bot.telegram_bot import ask_yes_no
+
+                    confirm = ask_yes_no("⚠️ <b>Submit button found.</b>\n\nReview the form. Ready to submit?")
+                    if confirm:
                         submit_btn.click()
                         page.wait_for_load_state("networkidle", timeout=15000)
                         status = "submitted"
