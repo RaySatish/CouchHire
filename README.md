@@ -682,9 +682,9 @@ Available at http://localhost:8501 once running.
 
 - [x] Core pipeline (JD parser → resume tailor → email drafter)
 - [x] Telegram bot (notifications + approval buttons + /outcome command + auto-retrain hook)
-- [ ] Gmail MCP integration (Step 16 — next)
-- [ ] Semi-autonomous browser agent (LLM-assisted ATS form filling + human-in-the-loop)
-- [ ] CDP session management for browser takeover
+- [x] Gmail MCP integration (Step 16 — next)
+- [x] Semi-autonomous browser agent (LLM-assisted ATS form filling + human-in-the-loop)
+- [x] CDP session management for browser takeover
 - [x] Supabase logging
 - [ ] Streamlit dashboard
 - [x] NLP match scorer + self-improving retraining loop (CosineSimilarityLoss, outcome labels, class balancing)
