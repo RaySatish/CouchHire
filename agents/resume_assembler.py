@@ -302,6 +302,17 @@ def extract_template_certification_blocks(certs_latex: str) -> dict[str, str]:
         block = "\n".join(lines[start_line:end_line]).rstrip()
         # Strip trailing \vspace
         block = re.sub(r"\s*\\vspace\{[^}]*\}\s*$", "", block).rstrip()
+        # Strip trailing \end{itemize} that belongs to the outer wrapper
+        # (the last entry captures it because end_line = len(lines)).
+        # Only strip if the \end{itemize} is unmatched (no corresponding
+        # \begin{itemize} in this block).
+        begin_count = block.count(r"\begin{itemize}")
+        end_count = block.count(r"\end{itemize}")
+        if end_count > begin_count:
+            # Remove only the last (unmatched) \end{itemize}
+            last_end = block.rfind(r"\end{itemize}")
+            if last_end >= 0:
+                block = (block[:last_end] + block[last_end + len(r"\end{itemize}"):]).rstrip()
         blocks[name] = block
 
     logger.info(
@@ -356,6 +367,17 @@ def extract_template_leadership_blocks(leadership_latex: str) -> dict[str, str]:
         )
         block = "\n".join(lines[start_line:end_line]).rstrip()
         block = re.sub(r"\s*\\vspace\{[^}]*\}\s*$", "", block).rstrip()
+        # Strip trailing \end{itemize} that belongs to the outer wrapper
+        # (the last entry captures it because end_line = len(lines)).
+        # Only strip if the \end{itemize} is unmatched (no corresponding
+        # \begin{itemize} in this block).
+        begin_count = block.count(r"\begin{itemize}")
+        end_count = block.count(r"\end{itemize}")
+        if end_count > begin_count:
+            # Remove only the last (unmatched) \end{itemize}
+            last_end = block.rfind(r"\end{itemize}")
+            if last_end >= 0:
+                block = (block[:last_end] + block[last_end + len(r"\end{itemize}"):]).rstrip()
         blocks[name] = block
 
     logger.info(
@@ -800,3 +822,69 @@ def reformat_skill_to_template_style(
         # plain style: \textbf{Category:} items \\
         trailing = " \\\\" if style_example_line.rstrip().endswith("\\\\") else ""
         return f"\\textbf{{{category_name}:}} {skill_items}{trailing}"
+
+
+def extract_section_itemize_wrapper(section_latex: str) -> tuple[str, str]:
+    r"""Extract the outer \begin{itemize}[...] and \end{itemize} from a section.
+
+    Returns (begin_line, end_line) where begin_line includes any options
+    like [leftmargin=*, itemsep=1.816pt, ...].
+
+    If no outer itemize is found, returns ("", "").
+
+    This is used to re-wrap CERTIFICATIONS and LEADERSHIP blocks after
+    extraction — the extract_template_*_blocks() functions strip the outer
+    wrapper, and _assemble_section_content() must re-add it.
+    """
+    begin_match = re.search(
+        r"(\\begin\{itemize\}(?:\[[^\]]*\])?)", section_latex
+    )
+    end_match = re.search(
+        r"(\\end\{itemize\})\s*$", section_latex
+    )
+    if begin_match and end_match:
+        return begin_match.group(1), end_match.group(1)
+    return "", ""
+
+
+def strip_outer_itemize_wrapper(block: str) -> str:
+    r"""Strip outer \begin{itemize}[...] and \end{itemize} from a block.
+
+    Used to clean TIER 2 LLM-reformatted blocks that may come back with
+    their own itemize wrapper (e.g. Oracle cert reformatted by LLM).
+    Only strips the outermost wrapper — nested itemize (e.g. sub-bullet
+    descriptions) are preserved.
+
+    Returns the block with the outer wrapper removed, or unchanged if
+    no outer wrapper is found.
+    """
+    stripped = block.strip()
+
+    # Check if block starts with \begin{itemize} and ends with \end{itemize}
+    if not stripped.startswith(r"\begin{itemize}"):
+        return block
+
+    # Count itemize depth to find the matching \end{itemize}
+    lines = stripped.split("\n")
+    depth = 0
+    begin_line_idx = None
+    end_line_idx = None
+
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith(r"\begin{itemize}"):
+            if depth == 0:
+                begin_line_idx = i
+            depth += 1
+        if s.startswith(r"\end{itemize}"):
+            depth -= 1
+            if depth == 0:
+                end_line_idx = i
+                break
+
+    if begin_line_idx is not None and end_line_idx is not None:
+        # Extract content between the outer wrapper lines
+        inner_lines = lines[begin_line_idx + 1 : end_line_idx]
+        return "\n".join(inner_lines).strip()
+
+    return block

@@ -626,6 +626,286 @@ def _enforce_instructions(selection: dict, instructions: str, inventory: dict, r
                 sel_key, sec_phrase,
             )
 
+    # ── Role-conditional project/section excludes ──
+    # Handle "do not use X for Y roles" / "do not use X project for Y roles"
+    # These are role-conditional — only apply when the current role matches.
+    role_lower = (requirements.get("role", "") or "").lower()
+
+    _ROLE_FILLER = {
+        "a", "an", "the", "it", "is", "not", "based", "related",
+        "role", "roles", "type", "position", "job", "any",
+    }
+
+    for m in re.finditer(
+        r"(?:do\s+not|never)\s+(?:include|use)\s+(?:the\s+)?"
+        r"(.+?)\s+(?:project\s+)?for\s+(.+?)\s*(?:roles?|positions?)"
+        r"(?:\s*[,.]|\s*$|\n)",
+        instructions_lower,
+        re.MULTILINE,
+    ):
+        item_phrase = m.group(1).strip().rstrip(".,;")
+        role_condition = m.group(2).strip().rstrip(".,;")
+
+        # Extract meaningful terms from the role condition
+        condition_terms = [
+            t for t in re.split(r"[\s/,\-]+", role_condition)
+            if t and t not in _ROLE_FILLER and len(t) > 1
+        ]
+
+        # Check if the current role matches the condition
+        role_matches = any(
+            term in role_lower for term in condition_terms
+        )
+
+        if role_matches:
+            # Remove the item from PROJECTS and project_order
+            inv_matches = _find_in_inventory(item_phrase)
+            removed_any = False
+            for sec_key, exact_name in inv_matches:
+                # Remove from sections_to_include
+                sel_key = sec_key
+                current = sections.get(sel_key)
+                if isinstance(current, list) and exact_name in current:
+                    current.remove(exact_name)
+                    sections[sel_key] = current
+                    removed_any = True
+
+                # Remove from project_order if it's a project
+                if sel_key == "PROJECTS" and exact_name in project_order:
+                    project_order.remove(exact_name)
+
+            if removed_any:
+                logger.info(
+                    "Instruction enforcement (role-conditional exclude): "
+                    "removed '%s' for role condition '%s' (role: %s)",
+                    item_phrase, role_condition, role_lower,
+                )
+
+    selection["project_order"] = project_order
+    if isinstance(sections.get("PROJECTS"), list):
+        # Keep PROJECTS in sync with project_order
+        sections["PROJECTS"] = list(project_order)
+
+    # Track source sections restricted by "only include" rules for this role.
+    # When a source section is restricted, only the explicitly listed items
+    # from that section are allowed in LEADERSHIP — all others must be removed.
+    _only_include_allowed: dict[str, set[str]] = {}
+
+    # ── Role-conditional "only include X from Y for Z roles" ──
+    # Handle "Only Include X and Y from Z for Q roles" patterns.
+    # This adds specific items from a source section to LEADERSHIP
+    # (or the appropriate target) when the role matches.
+    # Collect matches from BOTH orderings:
+    #   Pattern A: "only include X from Y for Z roles"
+    #   Pattern B: "include X from Y only for Z roles"  (alternate word order)
+    _only_include_matches: list[tuple[str, str, str]] = []
+    for m in re.finditer(
+        r"only\s+include\s+(.+?)\s+(?:in\s+|from\s+)(?:the\s+)?"
+        r"(.+?)\s+for\s+(.+?)\s*(?:roles?|positions?)"
+        r"(?:\s*[,.]|\s*$|\n)",
+        instructions_lower,
+        re.MULTILINE,
+    ):
+        _only_include_matches.append((
+            m.group(1).strip().rstrip(".,;"),
+            m.group(2).strip().rstrip(".,;"),
+            m.group(3).strip().rstrip(".,;"),
+        ))
+    for m in re.finditer(
+        r"include\s+(.+?)\s+(?:in\s+)?(?:from\s+)(?:the\s+)?"
+        r"(.+?)\s+only\s+for\s+(.+?)\s*(?:roles?|positions?)"
+        r"(?:\s*[,.]|\s*$|\n)",
+        instructions_lower,
+        re.MULTILINE,
+    ):
+        _only_include_matches.append((
+            m.group(1).strip().rstrip(".,;"),
+            m.group(2).strip().rstrip(".,;"),
+            m.group(3).strip().rstrip(".,;"),
+        ))
+
+    for items_str, source_section, role_condition in _only_include_matches:
+
+        # Extract role condition terms
+        condition_terms = [
+            t for t in re.split(r"[\s/,\-]+", role_condition)
+            if t and t not in _ROLE_FILLER and len(t) > 1
+        ]
+
+        role_matches = any(
+            term in role_lower for term in condition_terms
+        )
+
+        if role_matches:
+            # Parse individual item names from "X and Y" or "X, Y"
+            item_names = re.split(r"\s+and\s+|\s*,\s*", items_str)
+
+            for item_name in item_names:
+                item_name = item_name.strip().rstrip(".,;")
+                if not item_name or len(item_name) < 3:
+                    continue
+
+                # Find the item in inventory — try exact substring first,
+                # then fall back to word-overlap matching for fuzzy names
+                # (e.g. "solved 400+ problems" → "Solved 400+ algorithmic problems (80+ Hard)")
+                inv_matches = _find_in_inventory(item_name)
+                if not inv_matches:
+                    # Word-overlap fallback: extract significant words from
+                    # the item name and find inventory items that share most
+                    _stop = {"the", "a", "an", "and", "or", "in", "of", "for", "to", "from"}
+                    query_words = {
+                        w for w in re.split(r"[\s()\[\],;]+", item_name.lower())
+                        if w and w not in _stop and len(w) > 1
+                    }
+                    best_match = None
+                    best_overlap = 0
+                    for sec_key, sec_data in inventory.items():
+                        for inv_name in sec_data.get("names", []):
+                            inv_words = {
+                                w for w in re.split(r"[\s()\[\],;]+", inv_name.lower())
+                                if w and w not in _stop and len(w) > 1
+                            }
+                            overlap = len(query_words & inv_words)
+                            # Require at least 2 word overlap and >50% of query words
+                            if overlap >= 2 and overlap > best_overlap and overlap >= len(query_words) * 0.5:
+                                best_overlap = overlap
+                                best_match = (sec_key, inv_name)
+                    if best_match:
+                        inv_matches = [best_match]
+
+                for sec_key, exact_name in inv_matches:
+                    # Map to the correct selection section
+                    sel_key = sec_key
+                    if sec_key == "ACADEMIC_ACHIEVEMENTS":
+                        sel_key = "LEADERSHIP"
+
+                    current = sections.get(sel_key)
+                    if isinstance(current, list):
+                        if exact_name not in current:
+                            current.append(exact_name)
+                            sections[sel_key] = current
+                            logger.info(
+                                "Instruction enforcement (role-conditional include): "
+                                "added '%s' to %s for role condition '%s'",
+                                exact_name, sel_key, role_condition,
+                            )
+                    elif current is True:
+                        pass
+                    elif not current:
+                        sections[sel_key] = [exact_name]
+                        logger.info(
+                            "Instruction enforcement (role-conditional include): "
+                            "created %s with '%s' for role condition '%s'",
+                            sel_key, exact_name, role_condition,
+                        )
+
+            # ── "Only include" exclusion: remove non-specified items ──
+            # The word "only" means these are the EXCLUSIVE items allowed
+            # from this source section. Remove all other items that
+            # originated from the source section.
+            source_key = None
+            for inv_key in inventory:
+                if inv_key.lower().replace("_", " ").rstrip("s") in source_section.replace("_", " "):
+                    source_key = inv_key
+                    break
+                if source_section.replace("_", " ") in inv_key.lower().replace("_", " "):
+                    source_key = inv_key
+                    break
+
+            if source_key:
+                # Build set of allowed exact names from this source
+                allowed_names = set()
+                for item_name in item_names:
+                    item_name = item_name.strip().rstrip(".,;")
+                    if not item_name or len(item_name) < 3:
+                        continue
+                    # Re-find matches (same logic as above)
+                    matches = _find_in_inventory(item_name)
+                    if not matches:
+                        _stop = {"the", "a", "an", "and", "or", "in", "of", "for", "to", "from"}
+                        query_words = {
+                            w for w in re.split(r"[\s()\[\],;]+", item_name.lower())
+                            if w and w not in _stop and len(w) > 1
+                        }
+                        best_match = None
+                        best_overlap = 0
+                        for sk, sd in inventory.items():
+                            for inv_name in sd.get("names", []):
+                                inv_words = {
+                                    w for w in re.split(r"[\s()\[\],;]+", inv_name.lower())
+                                    if w and w not in _stop and len(w) > 1
+                                }
+                                overlap = len(query_words & inv_words)
+                                if overlap >= 2 and overlap > best_overlap and overlap >= len(query_words) * 0.5:
+                                    best_overlap = overlap
+                                    best_match = (sk, inv_name)
+                        if best_match:
+                            matches = [best_match]
+                    for _, exact_name in matches:
+                        allowed_names.add(exact_name)
+
+                # Track this restriction for the cross-section handler
+                _only_include_allowed[source_key] = allowed_names
+
+                # Get all item names from the source section in inventory
+                all_source_items = set(inventory.get(source_key, {}).get("names", []))
+                disallowed = all_source_items - allowed_names
+
+                # Remove disallowed items from LEADERSHIP (where source items are mapped)
+                target_key = "LEADERSHIP" if source_key == "ACADEMIC_ACHIEVEMENTS" else source_key
+                current = sections.get(target_key)
+                if isinstance(current, list):
+                    before_count = len(current)
+                    sections[target_key] = [
+                        item for item in current if item not in disallowed
+                    ]
+                    removed = before_count - len(sections[target_key])
+                    if removed > 0:
+                        logger.info(
+                            "Instruction enforcement (only-include exclusion): "
+                            "removed %d non-specified %s items from %s for role '%s'. "
+                            "Allowed: %s",
+                            removed, source_key, target_key, role_condition,
+                            allowed_names,
+                        )
+
+    # ── Role-conditional "exclude X" from LEADERSHIP for specific roles ──
+    # Handle "for Quant roles exclude X" patterns
+    for m in re.finditer(
+        r"for\s+(.+?)\s*(?:roles?|positions?)\s+exclude\s+(.+?)"
+        r"(?:\s+(?:achievement|entry|item|if\b)|\s*[,.]|\s*$|\n)",
+        instructions_lower,
+        re.MULTILINE,
+    ):
+        role_condition = m.group(1).strip().rstrip(".,;")
+        item_phrase = m.group(2).strip().rstrip(".,;")
+
+        condition_terms = [
+            t for t in re.split(r"[\s/,\-]+", role_condition)
+            if t and t not in _ROLE_FILLER and len(t) > 1
+        ]
+
+        role_matches = any(
+            term in role_lower for term in condition_terms
+        )
+
+        if role_matches:
+            inv_matches = _find_in_inventory(item_phrase)
+            for sec_key, exact_name in inv_matches:
+                sel_key = sec_key
+                if sec_key in ("LEADERSHIP", "ACADEMIC_ACHIEVEMENTS"):
+                    sel_key = "LEADERSHIP"
+
+                current = sections.get(sel_key)
+                if isinstance(current, list) and exact_name in current:
+                    current.remove(exact_name)
+                    sections[sel_key] = current
+                    logger.info(
+                        "Instruction enforcement (role-conditional exclude): "
+                        "removed '%s' from %s for role '%s'",
+                        exact_name, sel_key, role_condition,
+                    )
+
     # ── Generic "do not include X" enforcement ──
     # Parse "do not include X in Y" / "do not include X"
     exclude_matches = re.finditer(
@@ -644,7 +924,7 @@ def _enforce_instructions(selection: dict, instructions: str, inventory: dict, r
             continue
 
         # Remove trailing context
-        item_phrase = re.sub(r"\s+(?:instead|except|if\s+).*$", "", item_phrase)
+        item_phrase = re.sub(r"\s+(?:instead|except|if\s+|for\s+).*$", "", item_phrase)
 
         # Determine which sections to check
         sections_to_check = []
@@ -807,6 +1087,17 @@ def _enforce_instructions(selection: dict, instructions: str, inventory: dict, r
 
             inv_matches = _find_in_inventory(alt)
             for sec_key, exact_name in inv_matches:
+                # Skip if this source section is restricted by an
+                # "only include" rule and this item isn't in the allowed set
+                if sec_key in _only_include_allowed:
+                    if exact_name not in _only_include_allowed[sec_key]:
+                        logger.info(
+                            "Instruction enforcement (instead include): "
+                            "SKIPPED '%s' — %s is restricted by 'only include' rule",
+                            exact_name, sec_key,
+                        )
+                        continue
+
                 sel_key = sec_key
                 if sec_key == "ACADEMIC_ACHIEVEMENTS":
                     sel_key = "LEADERSHIP"
@@ -835,9 +1126,14 @@ def _enforce_instructions(selection: dict, instructions: str, inventory: dict, r
     # If instructions mention "Certificate of Merit" or "Merit Scholarship"
     # in the Leadership context, and there's an ACADEMIC_ACHIEVEMENTS section
     # in the inventory, pull matching items into the LEADERSHIP selection.
-    if any(term in instructions_lower for term in [
-        "certificate of merit", "merit scholarship", "merit scholarships"
-    ]):
+    # SKIP if ACADEMIC_ACHIEVEMENTS is restricted by an "only include" rule —
+    # in that case, only the explicitly allowed items should appear.
+    if (
+        "ACADEMIC_ACHIEVEMENTS" not in _only_include_allowed
+        and any(term in instructions_lower for term in [
+            "certificate of merit", "merit scholarship", "merit scholarships"
+        ])
+    ):
         leadership = sections.get("LEADERSHIP", [])
         if isinstance(leadership, list):
             # Check if already present

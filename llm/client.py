@@ -41,7 +41,7 @@ def _friendly_provider_name(model_string: str) -> str:
     return model_string.split("/")[0] if "/" in model_string else model_string
 
 
-def complete(prompt: str, system_prompt: str | None = None) -> str:
+def complete(prompt: str, system_prompt: str | None = None, max_tokens: int | None = None) -> str:
     """Send a prompt to the configured LLM provider and return the response text.
 
     Tries the primary provider first, then walks the FALLBACK_CHAIN from
@@ -52,6 +52,9 @@ def complete(prompt: str, system_prompt: str | None = None) -> str:
         prompt: The user/instruction prompt.
         system_prompt: Optional system-level instruction prepended to the
             conversation.
+        max_tokens: Optional maximum number of tokens in the response.
+            If None, uses the provider's default. Set this for calls
+            that need long structured output (e.g. JSON selection).
 
     Returns:
         The model's response as a plain string.
@@ -110,6 +113,10 @@ def complete(prompt: str, system_prompt: str | None = None) -> str:
         try:
             # Build kwargs for litellm.completion
             kwargs: dict = {"model": model, "messages": messages}
+
+            # Set max_tokens if caller requested it
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
 
             # OpenRouter requires HTTP-Referer header for their free tier
             if is_openrouter:

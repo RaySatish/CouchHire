@@ -72,8 +72,20 @@ Be specific (e.g. "React" not "frontend framework").
 
 
 def _strip_markdown_fences(text: str) -> str:
-    """Remove ```json ... ``` or ``` ... ``` wrappers if present."""
+    """Remove ```json ... ```, <think>...</think>, and other wrapping from LLM output."""
     stripped = text.strip()
+    # Remove <think>...</think> blocks (reasoning models like Qwen3, DeepSeek-R1)
+    stripped = re.sub(r"<think>.*?</think>", "", stripped, flags=re.DOTALL)
+    stripped = stripped.strip()
+    # Handle UNCLOSED <think> tag — model may output <think>... with no </think>.
+    # Try to extract JSON from after the reasoning block.
+    if not stripped or (stripped.startswith("<think>") and "</think>" not in text):
+        # Find the first { that starts a JSON object
+        json_start = text.rfind("{")
+        if json_start >= 0:
+            stripped = text[json_start:]
+        else:
+            stripped = ""
     # Match ```json\n...\n``` or ```\n...\n```
     match = re.match(r"^```(?:json)?\s*\n?(.*?)\n?\s*```$", stripped, re.DOTALL)
     if match:

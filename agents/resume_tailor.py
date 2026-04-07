@@ -38,6 +38,8 @@ from agents.resume_assembler import (
     detect_skills_container_format,
     extract_skills_container_wrapper,
     reformat_skill_to_template_style,
+    extract_section_itemize_wrapper,
+    strip_outer_itemize_wrapper,
 )
 
 logger = logging.getLogger(__name__)
@@ -194,6 +196,9 @@ def _assemble_section_content(
         return None  # Keep template default
 
     # SKILLS: 3-tier resolution with category selection
+    # (NOTE: Skills tier order is INVERTED from other sections —
+    #  master CV is content source, template is formatting ref only.
+    #  See _assemble_skills_section docstring for details.)
     if marker == "SKILLS" and value is True:
         return _assemble_skills_section(
             selection=selection,
@@ -251,10 +256,38 @@ def _assemble_section_content(
             )
             return raw_content
 
+        # Strip stray outer itemize wrappers from TIER 2 reformatted blocks
+        # (e.g. Oracle cert LLM-reformatted with its own \begin{itemize})
+        if marker in ("CERTIFICATIONS", "LEADERSHIP"):
+            ordered_content = [
+                strip_outer_itemize_wrapper(block)
+                for block in ordered_content
+            ]
+
         # Join blocks with appropriate spacing
         if marker == "PROJECTS":
             sep = project_separator if project_separator else "\n\n"
             return sep.join(ordered_content)
+        elif marker in ("CERTIFICATIONS", "LEADERSHIP"):
+            # Re-wrap in the outer \begin{itemize}[...]...\end{itemize}
+            # that extract_template_*_blocks() stripped during extraction.
+            joined = "\n\n".join(ordered_content)
+            begin_wrapper, end_wrapper = extract_section_itemize_wrapper(
+                style_example
+            )
+            if begin_wrapper and end_wrapper:
+                logger.info(
+                    "Wrapping %s in itemize container: %s",
+                    marker, begin_wrapper,
+                )
+                return f"{begin_wrapper}\n{joined}\n{end_wrapper}"
+            else:
+                logger.warning(
+                    "No itemize wrapper found in template for %s "
+                    "— injecting without wrapper",
+                    marker,
+                )
+                return joined
         else:
             return "\n\n".join(ordered_content)
 
@@ -509,6 +542,40 @@ def _filter_skill_items(
     return result
 
 
+def _extract_skill_items_from_block(block: str) -> str:
+    r"""Extract the skill items (comma-separated values) from a skill category block.
+
+    Handles formats like:
+        \item \textbf{Programming:} Python, SQL, R, MATLAB, Java, C
+        \textbf{Programming: } & Python, SQL, R, MATLAB, Java, C \\
+        \textbf{Programming:} Python, SQL, R, MATLAB, Java, C
+
+    Returns the items portion only (e.g. "Python, SQL, R, MATLAB, Java, C").
+    """
+    import re
+    # Strip leading \item, whitespace
+    text = block.strip()
+    if text.startswith(r"\item"):
+        text = text[len(r"\item"):].strip()
+
+    # Remove \textbf{Category:} or \textbf{Category: } prefix
+    text = re.sub(r"\\textbf\{[^}]+?\s*:\s*\}\s*", "", text, count=1)
+
+    # Remove leading & (tabularx separator)
+    text = text.lstrip("&").strip()
+
+    # Remove trailing \\ (row terminator)
+    text = re.sub(r"\s*\\\\$", "", text).strip()
+
+    # Remove any trailing \hfill + second category (shouldn't happen with
+    # properly split blocks, but be defensive)
+    hfill_pos = text.find(r"\hfill")
+    if hfill_pos > 0:
+        text = text[:hfill_pos].strip()
+
+    return text
+
+
 def _assemble_skills_section(
     selection: dict,
     raw_content: str,
@@ -516,13 +583,15 @@ def _assemble_skills_section(
 ) -> str:
     """Assemble the SKILLS section using 3-tier resolution with category selection.
 
+    Master CV is the primary CONTENT source; template is for FORMATTING only.
+
     1. Get skill_categories_to_include from LLM selection JSON
-    2. Extract skill blocks from TEMPLATE (tabularx/itemize/plain)
-    3. Extract skill blocks from MASTER_CV
+    2. Extract skill blocks from TEMPLATE (tabularx/itemize/plain) — formatting ref
+    3. Extract skill blocks from MASTER_CV — content source
     4. For each selected category:
-       TIER 1: Use template version if category exists there
-       TIER 2: Reformat master_cv content to template style
-       TIER 3: Use master_cv version as-is
+       TIER 1: Master CV content, reformatted to template style
+       TIER 2: Master CV content as-is (no template style available)
+       TIER 3: Template-only fallback (category not in master CV)
     5. Assemble in order from skill_categories_to_include
     6. Wrap in template's container format (tabularx/itemize/plain)
 
@@ -579,30 +648,126 @@ def _assemble_skills_section(
             style_example_line = tdata["block"]
             break
 
-    # 5. Resolve each category using 3-tier logic
-    resolved_lines: list[str] = []
-    for cat_name in categories_to_include:
-        # Try to find in template blocks (fuzzy)
-        tmpl_match = _fuzzy_find(cat_name, template_skill_blocks)
-        # Try to find in master_cv blocks (fuzzy)
-        master_match = _fuzzy_find(cat_name, master_skill_blocks)
-
-        if tmpl_match:
-            tmpl_data = template_skill_blocks[tmpl_match]
-            # TIER 1: Use template version directly
+    # 4b. Detect \hfill-paired categories in the template.
+    # When two categories share the same block (e.g. "Programming \hfill Soft Skills"),
+    # they must be recombined into a single line using master CV content.
+    # We also store the original left-right order from the template so the
+    # combined line always puts the same category on the left regardless of
+    # which category the LLM lists first in its selection.
+    hfill_pairs: dict[str, str] = {}  # maps each cat -> its partner
+    hfill_pair_order: dict[str, tuple[str, str]] = {}  # maps each cat -> (left_cat, right_cat)
+    _seen_blocks: dict[str, str] = {}  # block_text -> first_cat_name
+    for tcat, tdata in template_skill_blocks.items():
+        block_text = tdata.get("block", "").strip()
+        if not block_text or r"\hfill" not in block_text:
+            continue
+        if block_text in _seen_blocks:
+            # Found a pair: _seen_blocks[block_text] is the LEFT, tcat is the RIGHT
+            # (extract_template_skill_blocks iterates in line order)
+            left_cat = _seen_blocks[block_text]
+            right_cat = tcat
+            hfill_pairs[left_cat] = right_cat
+            hfill_pairs[right_cat] = left_cat
+            hfill_pair_order[left_cat] = (left_cat, right_cat)
+            hfill_pair_order[right_cat] = (left_cat, right_cat)
             logger.info(
-                "SKILLS TIER 1: using template version for '%s' (matched '%s')",
-                cat_name, tmpl_match,
+                "SKILLS: detected \\hfill pair: '%s' (left) <-> '%s' (right)",
+                left_cat, right_cat,
             )
-            resolved_lines.append(tmpl_data["block"])
+        else:
+            _seen_blocks[block_text] = tcat
 
-        elif master_match:
-            # Category exists in master_cv but not template
-            if style_example_line:
-                # TIER 2: Reformat master_cv to template style
+    # 5. Resolve each category — master CV is content source, template is formatting ref
+    resolved_lines: list[str] = []
+    hfill_emitted: set[str] = set()  # track categories already emitted as part of a \hfill pair
+    for cat_name in categories_to_include:
+        # Skip if already emitted as part of a \hfill pair
+        if cat_name in hfill_emitted:
+            continue
+
+        # Check if this category is part of a \hfill pair
+        partner = hfill_pairs.get(cat_name)
+        partner_selected = partner and partner.lower() in cats_lower
+
+        # Try to find in master_cv blocks (fuzzy) — primary content source
+        master_match = _fuzzy_find(cat_name, master_skill_blocks)
+        # Try to find in template blocks (fuzzy) — formatting ref / fallback
+        tmpl_match = _fuzzy_find(cat_name, template_skill_blocks)
+
+        # --- \hfill pair handling ---
+        # When both halves of a \hfill pair are selected, combine them into
+        # a single line using master CV content for both, formatted to match
+        # the template's \hfill structure.  Always use the template's original
+        # left-right ordering so "Programming \hfill Soft Skills" stays that way
+        # even if the LLM listed Soft Skills first.
+        if partner_selected and partner is not None:
+            partner_master = _fuzzy_find(partner, master_skill_blocks)
+
+            if master_match and partner_master:
+                # Both categories exist in master CV — recombine with \hfill
+                # Use the template's left-right order, not the selection order
+                left_cat, right_cat = hfill_pair_order.get(
+                    cat_name, (cat_name, partner)
+                )
+                left_master = _fuzzy_find(left_cat, master_skill_blocks)
+                right_master = _fuzzy_find(right_cat, master_skill_blocks)
+
+                left_content = master_skill_blocks[left_master or master_match]
+                right_content = master_skill_blocks[right_master or partner_master]
+
+                # Extract just the skill items from each master CV block
+                left_items = _extract_skill_items_from_block(left_content)
+                right_items = _extract_skill_items_from_block(right_content)
+
+                # Build the combined \hfill line using template format
+                # Detect the template style (tabularx & or plain)
+                if style_example_line and "&" in style_example_line:
+                    # tabularx format: \textbf{Left: } & items \hfill \textbf{Right: }items\\
+                    combined = (
+                        r"\textbf{" + left_cat + r": } & "
+                        + left_items
+                        + r"  \hfill \textbf{" + right_cat + r": }"
+                        + right_items
+                        + r"\\"
+                    )
+                elif style_example_line and r"\item" in style_example_line:
+                    # itemize format: \item \textbf{Left:} items \hfill \textbf{Right: }items
+                    combined = (
+                        r"    \item \textbf{" + left_cat + r":} "
+                        + left_items
+                        + r" \hfill \textbf{" + right_cat + r": }"
+                        + right_items
+                    )
+                else:
+                    # plain format
+                    combined = (
+                        r"\textbf{" + left_cat + r":} "
+                        + left_items
+                        + r" \hfill \textbf{" + right_cat + r": }"
+                        + right_items
+                    )
+
+                resolved_lines.append(combined)
+                hfill_emitted.add(cat_name)
+                hfill_emitted.add(partner)
                 logger.info(
-                    "SKILLS TIER 2: reformatting '%s' from master_cv to template style",
-                    cat_name,
+                    "SKILLS TIER 1 (\\hfill pair): combined '%s' (left) + '%s' (right) "
+                    "from master_cv into single line",
+                    left_cat, right_cat,
+                )
+                continue
+
+            # If one or both not in master CV, fall through to individual resolution
+
+        # --- Individual category resolution ---
+        if master_match:
+            # Master CV has this category — use its content
+            if style_example_line:
+                # TIER 1: Master CV content, reformatted to template style
+                logger.info(
+                    "SKILLS TIER 1: using master_cv content for '%s' "
+                    "(reformatted to template style, matched '%s')",
+                    cat_name, master_match,
                 )
                 reformatted = reformat_skill_to_template_style(
                     cat_name,
@@ -611,15 +776,28 @@ def _assemble_skills_section(
                 )
                 resolved_lines.append(reformatted)
             else:
-                # TIER 3: Use master_cv version as-is
+                # TIER 2: Master CV content as-is (no template style available)
                 logger.info(
-                    "SKILLS TIER 3: using master_cv version for '%s' as-is",
-                    cat_name,
+                    "SKILLS TIER 2: using master_cv content for '%s' as-is "
+                    "(no template style example, matched '%s')",
+                    cat_name, master_match,
                 )
                 resolved_lines.append(master_skill_blocks[master_match])
+
+        elif tmpl_match:
+            # Category only exists in template — use as fallback
+            tmpl_data = template_skill_blocks[tmpl_match]
+            # TIER 3: Template-only fallback
+            logger.info(
+                "SKILLS TIER 3: using template-only fallback for '%s' "
+                "(not in master_cv, matched template '%s')",
+                cat_name, tmpl_match,
+            )
+            resolved_lines.append(tmpl_data["block"])
+
         else:
             logger.warning(
-                "Skill category '%s' not found in template or master_cv — skipping",
+                "Skill category '%s' not found in master_cv or template — skipping",
                 cat_name,
             )
 
@@ -1464,8 +1642,8 @@ def tailor(cv_sections: list[str], requirements: dict) -> tuple[str, str]:
     # ── Step 6: Write .tex, compile PDF, enforce page limit ──
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    company = (requirements.get("company") or "company").replace(" ", "_")
-    role = (requirements.get("role") or "role").replace(" ", "_")
+    company = re.sub(r"[^\w-]", "_", requirements.get("company") or "company")
+    role = re.sub(r"[^\w-]", "_", requirements.get("role") or "role")
     timestamp = int(time.time())
     tex_name = f"resume_{company}_{role}_{timestamp}.tex"
     tex_path = _OUTPUT_DIR / tex_name

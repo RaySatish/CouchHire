@@ -177,15 +177,57 @@ def extract_item_blocks(section_latex: str) -> dict[str, str]:
 
     if item_textbf_positions:
         logger.debug("extract_item_blocks: using strategy 1/2 (\\item \\textbf)")
-        for i, start in enumerate(item_textbf_positions):
+
+        # Determine the indentation level of the first \item \textbf match
+        # so we can also detect top-level \item entries without \textbf
+        # (e.g. "\item Paper Presentation — ..." at the same indent level).
+        first_pos = item_textbf_positions[0]
+        line_start = section_latex.rfind("\n", 0, first_pos)
+        line_start = line_start + 1 if line_start >= 0 else 0
+        ref_indent = first_pos - line_start  # char count of leading whitespace
+
+        # Find ALL top-level \item entries (same indentation), including
+        # those without \textbf — these are valid standalone items.
+        all_item_positions: list[int] = []
+        for match in re.finditer(r"\\item\s", section_latex):
+            pos = match.start()
+            # Check indentation level
+            ls = section_latex.rfind("\n", 0, pos)
+            ls = ls + 1 if ls >= 0 else 0
+            indent = pos - ls
+            if indent == ref_indent:
+                all_item_positions.append(pos)
+
+        # Merge with textbf positions (deduplicate) and sort
+        merged = sorted(set(item_textbf_positions) | set(all_item_positions))
+
+        for i, start in enumerate(merged):
             end = (
-                item_textbf_positions[i + 1]
-                if i + 1 < len(item_textbf_positions)
+                merged[i + 1]
+                if i + 1 < len(merged)
                 else len(section_latex)
             )
             block = section_latex[start:end].rstrip()
             first_line = block.split("\n")[0]
-            name = _extract_name_from_textbf(first_line)
+            # Use textbf extraction if available, otherwise extract name
+            # from the plain \item line
+            if "\\textbf{" in first_line and first_line.strip().startswith("\\item") and "\\textbf{" in first_line.split("\\item")[1][:15]:
+                # \item \textbf{Name} — standard style
+                name = _extract_name_from_textbf(first_line)
+            else:
+                # Plain \item without leading \textbf — extract name
+                # from text between \item and the first delimiter
+                # (em-dash, \textbf, \hfill, comma, period, etc.)
+                plain = re.sub(r"^\s*\\item\s*", "", first_line)
+                # Split on common delimiters
+                name_part = re.split(
+                    r"\s*[—–\-]\s*\\textbf|\s*\\hfill|\s*\\textbf\{|,\s+\d|\.$",
+                    plain,
+                )[0].strip().rstrip(".,;: ")
+                if name_part and len(name_part) >= 3:
+                    name = name_part
+                else:
+                    name = _extract_name_from_line(first_line)
             blocks[name] = block
         return blocks
 
