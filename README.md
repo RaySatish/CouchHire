@@ -52,7 +52,7 @@ CouchHire is a fully agentic job application pipeline. Paste a job description, 
 | NLP | spaCy + sentence-transformers | NER for skill extraction, cosine similarity for match scoring |
 | Database | Supabase (PostgreSQL) | Applications table, outcome labels, retraining data |
 | Job search | Indeed MCP | Proactive job pulls into the pipeline |
-| Email send | Gmail MCP | Sends email + resume PDF attachment |
+| Email drafts | Gmail MCP | Creates Gmail draft with resume PDF attachment (never auto-sends) |
 | Browser automation | Playwright | ATS form filling, Chrome DevTools Protocol for live session handoff |
 | Notifications + review | Telegram bot (python-telegram-bot) | Approve / edit / label outcomes from your phone |
 | Dashboard | Streamlit | Application tracker, analytics, retrain controls, settings |
@@ -69,6 +69,9 @@ couchhire/
 │   ├── cv_rag.py             # ChromaDB retrieval from master CV → ranked CV sections
 │   ├── match_scorer.py       # NLP match scoring → float 0–100
 │   ├── resume_tailor.py      # LaTeX resume tailoring → compiled PDF path
+│   ├── llm_selector.py       # LLM-driven content selection + instruction enforcement
+│   ├── resume_assembler.py   # LaTeX block extraction + itemize wrapper utilities
+│   ├── cv_content_helpers.py # Section → named block extraction + content inventory builder
 │   ├── cover_letter.py       # Cover letter generation (conditional) → string
 │   ├── email_drafter.py      # Email draft generation → subject + body strings
 │   └── apply_router.py       # Detects email / form / manual route → route string
@@ -101,6 +104,7 @@ couchhire/
 │       ├── resume_template.tex
 │       └── instructions.md
 ├── pipeline.py               # LangGraph orchestrator — main entry point
+├── generate_resume.py        # Standalone resume generator CLI (skips email/Telegram)
 ├── config.py                 # Reads .env, validates all keys on startup, exposes config
 ├── .env                      # Your secrets — never committed to git
 ├── .env.example              # Template with all variable names — committed to git
@@ -147,7 +151,9 @@ This section is intentionally precise so that each module has a clear contract. 
 
 - **Reads:** `state["cv_sections"]`, `state["requirements"]`
 - **Also retrieves from ChromaDB:** resume template (`type=template`), tailoring instructions (`type=instructions`)
-- **Process:** injects tailored content into template's `%%INJECT:<SECTION>%%` markers, compiles via `pdflatex`
+- **Process:** Uses `llm_selector.py` for LLM-driven content selection (which projects, skills, certs, leadership items to include), then `resume_assembler.py` for LaTeX block extraction, then injects tailored content into template's `%%INJECT:<SECTION>%%` markers, compiles via `pdflatex`
+- **3-tier content resolution per section:** TIER 1 = exact template block, TIER 2 = LLM-reformatted master CV content, TIER 3 = raw master CV fallback
+- **Instruction enforcement:** Role-conditional includes/excludes (e.g. "exclude CouchHire for Quant roles", "include Paper Presentation for Quant roles")
 - **Intermediate file:** `cv/output/tailored_<timestamp>.tex` (gitignored)
 
 ### `agents/cover_letter.py`
@@ -198,8 +204,10 @@ This section is intentionally precise so that each module has a clear contract. 
 - **Output:** new match scorer model replaces old if validation accuracy improves
 
 ### `llm/client.py`
-- Single function: `complete(prompt, system_prompt=None) → str`
-- Reads `LLM_PROVIDER` from config, routes to correct LiteLLM model
+- Single function: `complete(prompt, system_prompt=None, max_tokens=None) → str`
+- Reads `LLM_PROVIDER` from config, routes to correct LiteLLM model via 9-model fallback chain across 5 providers
+- `max_tokens` parameter for calls needing long structured output (e.g. JSON content selection)
+- Handles `<think>...</think>` blocks from reasoning models (Qwen3, DeepSeek-R1)
 - All agents call this — never call LiteLLM directly from an agent
 
 ### `config.py`
@@ -230,9 +238,9 @@ match_score >= MATCH_THRESHOLD?
   Yes → continue
         │
         ▼
-Generator agents (run in parallel via LangGraph)
-  ├─ resume_tailor.py   → tailored .tex → pdflatex → PDF path
-  ├─ cover_letter.py    → only if cover_letter_required == True
+Generator agents (sequential via LangGraph)
+  ├─ resume_tailor.py   → LLM content selection → tailored .tex → pdflatex → PDF path
+  ├─ cover_letter.py    → only if cover_letter_required == True (receives resume_content)
   └─ email_drafter.py   → subject line + body (≤200 words)
         │
         ▼
@@ -569,6 +577,25 @@ After running, check your Telegram — you should receive a notification card fo
 
 ---
 
+## Standalone Resume Generation
+
+If you just want to generate a tailored resume without the full pipeline (no Telegram, no email, no apply routing):
+
+```bash
+# With a JD pasted inline
+python generate_resume.py --jd "Paste the full job description text here"
+
+# From a file
+python generate_resume.py --file path/to/jd.txt
+
+# Uses a built-in default JD for quick testing
+python generate_resume.py
+```
+
+The output PDF is saved to `cv/output/` and the path is printed to the console.
+
+---
+
 ## Docker (Alternative)
 
 If you prefer not to manage Python, pdflatex, and Playwright installations manually, Docker handles all of it.
@@ -625,14 +652,14 @@ Available at http://localhost:8501 once running.
 
 ## Roadmap
 
-- [ ] Core pipeline (JD parser → resume tailor → email drafter)
+- [x] Core pipeline (JD parser → resume tailor → email drafter)
 - [ ] Telegram bot (notifications + approval buttons)
-- [ ] Gmail MCP integration
+- [ ] Gmail MCP integration (Step 16 — next)
 - [ ] Playwright form filling
 - [ ] Manual takeover session handoff
 - [x] Supabase logging
 - [ ] Streamlit dashboard
-- [ ] NLP match scorer + retraining loop
+- [x] NLP match scorer + retraining loop
 - [ ] Indeed MCP job pulls
 - [x] LiteLLM multi-provider support
 - [ ] Docker support
