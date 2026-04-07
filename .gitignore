@@ -40,3 +40,5 @@ MEMORY.md
 
 tests/
 test_jds/
+# Fine-tuned NLP models — user-specific, never commit
+nlp/models/

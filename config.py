@@ -135,6 +135,20 @@ FORM_ANSWERS_PATH: Path = (
 )
 
 # ---------------------------------------------------------------------------
+# Optional variables — NLP retraining
+# ---------------------------------------------------------------------------
+
+# Minimum number of labeled outcomes required before retraining is allowed.
+# Below this threshold, there's not enough signal to fine-tune meaningfully.
+_raw_min_retrain = _env("MIN_RETRAIN_LABELS")
+MIN_RETRAIN_LABELS: int = int(_raw_min_retrain) if _raw_min_retrain is not None else 10
+
+# How often to auto-retrain: every N new outcome labels.
+# Set to 0 to disable auto-retrain (manual only via dashboard/CLI).
+_raw_retrain_every = _env("RETRAIN_EVERY")
+RETRAIN_EVERY: int = int(_raw_retrain_every) if _raw_retrain_every is not None else 10
+
+# ---------------------------------------------------------------------------
 # Validation — runs on import
 # ---------------------------------------------------------------------------
 
@@ -199,6 +213,9 @@ CV_DIR: Path = _PROJECT_ROOT / "cv"
 CHROMA_STORE_DIR: Path = CV_DIR / "chroma_store"
 MASTER_CV_PATH: Path = CV_DIR / "master_cv.tex"
 OUTPUT_DIR: Path = _PROJECT_ROOT / "output"
+
+# Directory where fine-tuned models are saved (gitignored via nlp/models/).
+FINETUNED_MODEL_DIR: Path = _PROJECT_ROOT / "nlp" / "models" / "match_scorer_finetuned"
 
 # ---------------------------------------------------------------------------
 # Fallback chain — built dynamically based on which API keys are present.

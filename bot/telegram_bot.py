@@ -388,7 +388,7 @@ async def _handle_outcome(update: Update, context) -> None:
 
     if label not in _VALID_OUTCOMES:
         await update.message.reply_text(
-            f"❌ Invalid label: <code>{_escape_html(label)}</code>\n\n"
+            f"\u274c Invalid label: <code>{_escape_html(label)}</code>\n\n"
             f"Valid labels: interview, rejected, no_response, offer, withdrawn",
             parse_mode="HTML",
         )
@@ -398,16 +398,53 @@ async def _handle_outcome(update: Update, context) -> None:
         from db.supabase_client import update_outcome
         update_outcome(application_id, label)
         await update.message.reply_text(
-            f'✅ Outcome "<b>{_escape_html(label)}</b>" recorded for application '
+            f'\u2705 Outcome "<b>{_escape_html(label)}</b>" recorded for application '
             f"<code>{_escape_html(application_id)}</code>.",
             parse_mode="HTML",
         )
     except Exception as exc:
         logger.error("Failed to update outcome for %s: %s", application_id, exc)
         await update.message.reply_text(
-            f"❌ Failed to update: {_escape_html(str(exc))}",
+            f"\u274c Failed to update: {_escape_html(str(exc))}",
             parse_mode="HTML",
         )
+        return
+
+    # --- Auto-retrain hook ---------------------------------------------------
+    # After a successful outcome update, check if we should retrain the
+    # match scorer model on accumulated outcome data.
+    try:
+        from nlp.retrain import should_retrain, retrain
+
+        if should_retrain():
+            await update.message.reply_text(
+                "\U0001f504 Retraining match scorer with new outcome data..."
+            )
+
+            # Run retrain in a thread to avoid blocking the bot event loop
+            def _retrain_background():
+                try:
+                    result = retrain()
+                    if result["status"] == "success":
+                        send_notification(
+                            f"\u2705 <b>Retrain Complete</b>\n\n"
+                            f"Trained on {result['num_positive']} positive + "
+                            f"{result['num_negative']} negative examples.\n"
+                            f"Model saved to <code>{result['model_path']}</code>"
+                        )
+                    else:
+                        send_notification(
+                            f"\u26a0\ufe0f Retrain {result['status']}: {result['reason']}"
+                        )
+                except Exception as exc:
+                    logger.error("Background retrain failed: %s", exc, exc_info=True)
+                    send_notification(f"\u274c Retrain failed: {exc}")
+
+            threading.Thread(target=_retrain_background, daemon=True).start()
+    except ImportError:
+        pass  # retrain module not available yet
+    except Exception as exc:
+        logger.warning("Auto-retrain check failed: %s", exc)
 
 
 async def _handle_status(update: Update, context) -> None:

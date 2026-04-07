@@ -8,6 +8,9 @@ in cv_rag.py; retrieval and scoring are separate concerns.
 The model's HF repo is missing its 1_Pooling/config.json, so we manually
 assemble the Transformer + Pooling pipeline on first load.
 
+If a fine-tuned model exists at FINETUNED_MODEL_DIR (produced by nlp/retrain.py),
+it is loaded instead of the base model.
+
 No LLM calls — pure sentence-transformers inference.
 """
 
@@ -26,34 +29,51 @@ _model = None
 def _get_model():
     """Lazily load the ATS semantic scoring model.
 
-    The HF repo for this model is missing its Pooling config directory,
-    so we load the Transformer component directly and attach a mean-pooling
-    layer manually.
+    Prefers a fine-tuned model from FINETUNED_MODEL_DIR if it exists.
+    Otherwise falls back to the base HF model with manual pooling assembly
+    (the HF repo is missing its 1_Pooling/config.json).
     """
     global _model
     if _model is None:
         from sentence_transformers import SentenceTransformer
-        from sentence_transformers.models import Transformer, Pooling
+        from config import FINETUNED_MODEL_DIR
 
-        logger.info("Loading ATS scoring model: %s", _SCORING_MODEL)
+        if FINETUNED_MODEL_DIR.exists() and any(FINETUNED_MODEL_DIR.iterdir()):
+            # Fine-tuned model exists — load it directly
+            # (it was saved as a complete SentenceTransformer, no manual assembly needed)
+            logger.info("Loading FINE-TUNED ATS scoring model from: %s", FINETUNED_MODEL_DIR)
+            _model = SentenceTransformer(str(FINETUNED_MODEL_DIR))
+            logger.info("Fine-tuned model loaded successfully")
+        else:
+            # No fine-tuned model — use base model with manual pooling
+            from sentence_transformers.models import Transformer, Pooling
 
-        # Load transformer weights from the HF repo
-        transformer = Transformer(_SCORING_MODEL)
-        embed_dim = transformer.get_word_embedding_dimension()
+            logger.info("Loading BASE ATS scoring model: %s", _SCORING_MODEL)
 
-        # Attach mean-pooling (the repo's modules.json declares Pooling
-        # but the 1_Pooling/config.json is absent — we supply it here)
-        pooling = Pooling(
-            word_embedding_dimension=embed_dim,
-            pooling_mode_mean_tokens=True,
-        )
+            # Load transformer weights from the HF repo
+            transformer = Transformer(_SCORING_MODEL)
+            embed_dim = transformer.get_word_embedding_dimension()
 
-        _model = SentenceTransformer(modules=[transformer, pooling])
-        logger.info(
-            "ATS scoring model loaded (dim=%d, pooling=mean)",
-            embed_dim,
-        )
+            # Attach mean-pooling (the repo's modules.json declares Pooling
+            # but the 1_Pooling/config.json is absent — we supply it here)
+            pooling = Pooling(
+                word_embedding_dimension=embed_dim,
+                pooling_mode_mean_tokens=True,
+            )
+
+            _model = SentenceTransformer(modules=[transformer, pooling])
+            logger.info(
+                "Base ATS scoring model loaded (dim=%d, pooling=mean)",
+                embed_dim,
+            )
     return _model
+
+
+def reload_model() -> None:
+    """Force reload the scoring model. Call after retraining."""
+    global _model
+    _model = None
+    logger.info("Scoring model cache cleared — will reload on next score() call")
 
 
 def score(jd_text: str, cv_sections: list[str]) -> float:
