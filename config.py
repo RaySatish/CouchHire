@@ -122,12 +122,16 @@ CDP_PORT: int = int(_raw_cdp_port) if _raw_cdp_port is not None else 9222
 APPLICANT_PHONE: str | None = _env("APPLICANT_PHONE")
 APPLICANT_LINKEDIN: str | None = _env("APPLICANT_LINKEDIN")
 
+# Whether to run the browser agent headless (no visible window).
+# Default: false (visible browser for development). Set to true in production.
+BROWSER_HEADLESS: bool = os.getenv("BROWSER_HEADLESS", "false").lower() in ("true", "1", "yes")
+
 # Path to persistent answer memory for ATS form fields.
-# Defaults to cv/uploads/form_answers.json (gitignored).
+# Defaults to cv/output/form_answers.json (gitignored).
 _raw_form_answers = _env("FORM_ANSWERS_PATH")
 FORM_ANSWERS_PATH: Path = (
     Path(_raw_form_answers) if _raw_form_answers is not None
-    else _PROJECT_ROOT / "cv" / "uploads" / "form_answers.json"
+    else _PROJECT_ROOT / "cv" / "output" / "form_answers.json"
 )
 
 # ---------------------------------------------------------------------------
