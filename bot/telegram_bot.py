@@ -1,4 +1,4 @@
-"""CouchHire Telegram bot — notifications, /outcome command, and browser agent interrupts.
+"""CouchHire Telegram bot — notifications, /outcome command, /search command, and browser agent interrupts.
 
 Two modes of operation:
 
@@ -6,11 +6,14 @@ Mode 1 — Sync notification senders (called by pipeline, browser_agent, etc.):
     send_notification(), send_photo(), send_job_card(), send_draft_ready(),
     send_form_started(), send_manual_notice()
 
-Mode 2 — Long-running async bot (for /outcome command + interrupt replies):
+Mode 2 — Long-running async bot (for /outcome, /search commands + interrupt replies):
     start_bot()  — blocking polling loop
 
 Browser agent interrupt system:
     ask_user(), ask_yes_no(), send_takeover_instructions()
+
+Job discovery:
+    /search command triggers JobSpy job search → filter → present with [Apply] buttons
 
 This file uses async handlers because python-telegram-bot requires it.
 This is one of the two allowed async exceptions per CLAUDE.md.
@@ -53,6 +56,11 @@ _pending_interrupt: dict | None = None
 
 # Valid outcome labels (must match DB CHECK constraint)
 _VALID_OUTCOMES = frozenset({"interview", "rejected", "no_response", "offer", "withdrawn"})
+
+# ---------------------------------------------------------------------------
+# Module-level state — search results cache for callback handling
+# ---------------------------------------------------------------------------
+_search_results_cache: list[dict] = []
 
 # ---------------------------------------------------------------------------
 # Persistent event loop — keeps telegram.Bot's httpx client alive across calls
@@ -365,6 +373,7 @@ async def _handle_start(update: Update, context) -> None:
         "\n"
         "Commands:\n"
         "/apply &lt;JD or URL&gt; — Start a new application\n"
+        "/search &lt;query&gt; [, location] [, job_type] — Search job boards for jobs\n"
         "/outcome &lt;id&gt; &lt;label&gt; — Label application outcome\n"
         "/status — Check bot status\n"
         "\n"
@@ -461,7 +470,6 @@ async def _handle_status(update: Update, context) -> None:
 
 
 
-
 async def _handle_apply(update: Update, context) -> None:
     """Handle the /apply command: paste a JD or URL to kick off the pipeline.
 
@@ -540,6 +548,124 @@ async def _handle_apply(update: Update, context) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# /search command — JobSpy job discovery
+# ---------------------------------------------------------------------------
+
+async def _handle_search(update: Update, context) -> None:
+    """Handle /search command — search job boards for matching jobs.
+
+    Usage:
+        /search Python Backend Engineer
+        /search Python Backend Engineer, Remote
+        /search Python Backend Engineer, Bangalore, fulltime
+    """
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /search &lt;query&gt; [, location] [, job_type]\n\n"
+            "Examples:\n"
+            "<code>/search Python Backend Engineer</code>\n"
+            "<code>/search Python Backend Engineer, Remote</code>\n"
+            "<code>/search ML Engineer, Bangalore, fulltime</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    # Parse comma-separated args: query, location, job_type
+    full_input = " ".join(context.args)
+    parts = [p.strip() for p in full_input.split(",")]
+    query = parts[0]
+    location = parts[1] if len(parts) > 1 else ""
+    job_type = parts[2] if len(parts) > 2 else ""
+
+    await update.message.reply_text(
+        f"🔍 Searching for: <b>{html.escape(query)}</b>"
+        + (f"\n📍 Location: {html.escape(location)}" if location else "")
+        + (f"\n📋 Type: {html.escape(job_type)}" if job_type else "")
+        + "\n\n⏳ Searching and scoring against your CV...",
+        parse_mode="HTML",
+    )
+
+    # Run search + filter in a background thread (it's CPU-heavy due to scoring)
+    def _search_background():
+        global _search_results_cache
+
+        try:
+            from jobs.job_search import search_jobs
+            from jobs.job_filter import filter_and_score, format_job_list
+            from config import MIN_MATCH_SCORE
+
+            # 1. Search job boards
+            raw_jobs = search_jobs(query=query, location=location, job_type=job_type)
+            logger.info("JobSpy returned %d raw results", len(raw_jobs))
+
+            if not raw_jobs:
+                send_notification("😕 No jobs found for that search. Try different keywords.")
+                return
+
+            # 2. Score and filter
+            scored_jobs = filter_and_score(raw_jobs)
+
+            if not scored_jobs:
+                send_notification(
+                    f"😕 Found {len(raw_jobs)} jobs but none scored above "
+                    f"your {MIN_MATCH_SCORE}% threshold. Try broader keywords."
+                )
+                return
+
+            # 3. Format and send results summary
+            results_text = format_job_list(scored_jobs)
+            send_notification(results_text)
+
+            # 4. Send each top job as a separate card with [Apply] button
+            for i, job in enumerate(scored_jobs[:5]):  # Top 5 get individual cards
+                title = html.escape(job.get("title", "Unknown"))
+                company = html.escape(job.get("company", "Unknown"))
+                score_val = job.get("match_score", 0)
+                job_url = job.get("url", "")
+                location_text = job.get("location", "")
+                salary = job.get("salary", "")
+
+                card_text = (
+                    f"📋 <b>{title}</b>\n"
+                    f"🏢 {company}\n"
+                    f"📊 Match: <b>{score_val:.0f}%</b>"
+                )
+                if location_text:
+                    card_text += f"\n📍 {html.escape(str(location_text))}"
+                if salary:
+                    card_text += f"\n💰 {html.escape(str(salary))}"
+
+                # Inline buttons: Apply (triggers pipeline) + View (job URL)
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "✅ Apply",
+                            callback_data=f"apply_{i}_{hash(job_url) % 10000}",
+                        ),
+                        InlineKeyboardButton("🔗 View Job", url=job_url),
+                    ]
+                ])
+
+                send_notification(card_text, reply_markup=keyboard)
+
+            # 5. Store scored_jobs in module-level state for callback handling
+            _search_results_cache = scored_jobs
+
+        except ConnectionError as exc:
+            logger.error("Job search failed: %s", exc)
+            send_notification(f"❌ Job search error: {html.escape(str(exc))}")
+        except Exception as exc:
+            logger.error("Search failed: %s", exc, exc_info=True)
+            send_notification(f"❌ Search failed: {html.escape(str(exc))}")
+
+    threading.Thread(target=_search_background, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Text reply handler (browser agent interrupts)
+# ---------------------------------------------------------------------------
+
 async def _handle_text_reply(update: Update, context) -> None:
     """Handle free-text replies (for browser agent interrupt responses)."""
     global _pending_interrupt
@@ -560,13 +686,69 @@ async def _handle_text_reply(update: Update, context) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Callback query handler (inline buttons)
+# ---------------------------------------------------------------------------
+
 async def _handle_callback(update: Update, context) -> None:
-    """Handle inline button presses (yes/no/done)."""
+    """Handle inline button presses (yes/no/done/apply_*)."""
     global _pending_interrupt
 
     query = update.callback_query
     data = query.data
 
+    # --- Handle apply_ callbacks from /search results ---
+    if data.startswith("apply_"):
+        parts = data.split("_")
+        try:
+            job_index = int(parts[1])
+        except (IndexError, ValueError):
+            await query.answer("Invalid callback data.")
+            return
+
+        if job_index < len(_search_results_cache):
+            job = _search_results_cache[job_index]
+            await query.answer("Starting application...")
+
+            # Update the card message to show progress
+            try:
+                await query.edit_message_text(
+                    query.message.text_html + "\n\n⏳ <i>Fetching full job description...</i>",
+                    parse_mode="HTML",
+                )
+            except telegram.error.TelegramError as exc:
+                logger.warning("Failed to edit message: %s", exc)
+
+            # Trigger pipeline in background
+            title = html.escape(job.get("title", ""))
+            company = html.escape(job.get("company", ""))
+
+            def _apply_from_search():
+                try:
+                    # Get full JD — already available from JobSpy search results
+                    full_jd = job.get("description", "")
+                    if not full_jd:
+                        # Fallback: try fetching (unlikely needed with JobSpy)
+                        from jobs.job_search import get_job_details
+                        details = get_job_details(job.get("url", ""))
+                        full_jd = details.get("description", "")
+
+                    # TODO: Wire to pipeline.py run_pipeline(jd_input=full_jd, source="telegram")
+                    send_notification(
+                        f"📥 <b>Application queued</b>\n\n"
+                        f"<b>{title}</b> at <b>{company}</b>\n\n"
+                        f"Full JD fetched ({len(full_jd)} chars). Pipeline wiring pending Step 25."
+                    )
+                except Exception as exc:
+                    logger.error("Apply from search failed: %s", exc, exc_info=True)
+                    send_notification(f"❌ Failed to start application: {html.escape(str(exc))}")
+
+            threading.Thread(target=_apply_from_search, daemon=True).start()
+        else:
+            await query.answer("Job not found in cache. Search again.")
+        return
+
+    # --- Handle yes/no/done callbacks (interrupt system) ---
     handled = False
     with _interrupt_lock:
         if _pending_interrupt is not None:
@@ -602,6 +784,7 @@ def start_bot() -> None:
     app.add_handler(CommandHandler("start", _handle_start))
     app.add_handler(CommandHandler("outcome", _handle_outcome))
     app.add_handler(CommandHandler("apply", _handle_apply))
+    app.add_handler(CommandHandler("search", _handle_search))
     app.add_handler(CommandHandler("status", _handle_status))
     app.add_handler(CallbackQueryHandler(_handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_text_reply))

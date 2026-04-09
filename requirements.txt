@@ -24,7 +24,10 @@ supabase>=2.7.0                 # Supabase Python client (PostgreSQL)
 
 # --- Gmail MCP Client -------------------------------------------------------
 mcp>=1.0.0                      # MCP Python SDK (client for Gmail MCP server)
-httpx>=0.27.0                   # HTTP client (required by MCP streamable-http transport)
+httpx>=0.27.0                   # HTTP client (MCP streamable-http transport for Gmail)
+
+# --- Job Search --------------------------------------------------------------
+python-jobspy>=1.1.75           # Multi-board job scraper (Indeed, LinkedIn, Google, etc.)
 
 # --- Telegram Bot ------------------------------------------------------------
 python-telegram-bot>=21.0       # Async Telegram bot (notifications + /outcome)

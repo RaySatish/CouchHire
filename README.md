@@ -30,7 +30,7 @@ CouchHire is a fully agentic job application pipeline. Paste a job description, 
 
 ## How It Works
 
-1. A job description comes in — either pasted manually, pulled automatically via Indeed MCP, or scraped from a URL.
+1. A job description comes in — either pasted manually, discovered via job board search (JobSpy), or scraped from a URL.
 2. The JD Parser extracts structured requirements: skills, apply method, cover letter needed, subject line format.
 3. The CV RAG agent retrieves the most relevant sections of your master CV from ChromaDB.
 4. The Match Scorer computes a fit percentage using sentence-transformers. If below the configured threshold, the job is skipped or flagged.
@@ -51,7 +51,7 @@ CouchHire is a fully agentic job application pipeline. Paste a job description, 
 | CV vector store | ChromaDB (local) | Master CV chunked by section and embedded locally |
 | NLP | spaCy + sentence-transformers | NER for skill extraction, cosine similarity for match scoring |
 | Database | Supabase (PostgreSQL) | Applications table, outcome labels, retraining data |
-| Job search | Indeed MCP | Proactive job pulls into the pipeline |
+| Job search | JobSpy (python-jobspy) | Multi-board job scraping: Indeed, LinkedIn, Glassdoor, Google, ZipRecruiter |
 | Email drafts | Gmail MCP | Creates Gmail draft with resume PDF attachment (never auto-sends) |
 | Browser automation | Playwright | Semi-autonomous ATS form filling via CDP (`connect_over_cdp()`), LLM-assisted field mapping, human-in-the-loop interrupt system via Telegram |
 | Notifications + review | Telegram bot (python-telegram-bot) | Approve / edit / label outcomes from your phone |
@@ -232,7 +232,7 @@ This section is intentionally precise so that each module has a clear contract. 
 ## Pipeline Flow
 
 ```
-Input (Indeed MCP / python pipeline.py --jd "..." / URL)
+Input (JobSpy search / python pipeline.py --jd "..." / URL)
         │
         ▼
 jd_parser.py
@@ -395,10 +395,15 @@ You need at least one LLM key. All others are required for full functionality.
 
 ---
 
-### Indeed MCP
-1. Go to https://developer.indeed.com
-2. Create an application to get API access
-3. Copy your token → `INDEED_MCP_TOKEN`
+### Job Search (JobSpy)
+No API keys required! JobSpy scrapes job boards directly.
+
+Optional configuration in `.env`:
+- `JOBSPY_SITES` — Which boards to search (default: `indeed,linkedin,google`)
+- `JOBSPY_COUNTRY` — Country for Indeed/Glassdoor (default: `USA`)
+- `JOBSPY_PROXIES` — Proxy list to avoid rate limiting (optional)
+
+⚠️  LinkedIn is rate-limit aggressive (~10 pages per IP). Use proxies for heavy LinkedIn scraping.
 
 ---
 
@@ -595,9 +600,9 @@ python pipeline.py --jd "Paste the full job description text here"
 python pipeline.py --url "https://jobs.example.com/job/12345"
 ```
 
-**Pull jobs automatically from Indeed MCP:**
+**Search job boards:**
 ```bash
-python pipeline.py --indeed --query "machine learning engineer" --location "London"
+python pipeline.py --search --query "machine learning engineer" --location "London"
 ```
 
 After running, check your Telegram — you should receive a notification card for each job that passes the match threshold.
@@ -688,7 +693,7 @@ Available at http://localhost:8501 once running.
 - [x] Supabase logging
 - [ ] Streamlit dashboard
 - [x] NLP match scorer + self-improving retraining loop (CosineSimilarityLoss, outcome labels, class balancing)
-- [ ] Indeed MCP job pulls
+- [x] Multi-board job search (JobSpy — Indeed, LinkedIn, Google, Glassdoor, ZipRecruiter)
 - [x] LiteLLM multi-provider support
 - [ ] Docker support
 - [ ] Open source release

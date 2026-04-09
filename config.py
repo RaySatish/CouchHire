@@ -87,8 +87,6 @@ TELEGRAM_CHAT_ID: str | None = _env("TELEGRAM_CHAT_ID")
 
 GMAIL_MCP_URL: str | None = _env("GMAIL_MCP_URL")
 
-INDEED_MCP_TOKEN: str | None = _env("INDEED_MCP_TOKEN")
-
 GITHUB_URL: str | None = _env("GITHUB_URL")
 APPLICANT_NAME: str | None = _env("APPLICANT_NAME")
 
@@ -149,6 +147,29 @@ _raw_retrain_every = _env("RETRAIN_EVERY")
 RETRAIN_EVERY: int = int(_raw_retrain_every) if _raw_retrain_every is not None else 10
 
 # ---------------------------------------------------------------------------
+# Optional variables — Job Search / Discovery
+# ---------------------------------------------------------------------------
+
+# Minimum match score (0-100) to include a job in search results.
+# Jobs below this threshold are filtered out before showing to user.
+_raw_min_score = _env("MIN_MATCH_SCORE")
+MIN_MATCH_SCORE: float = float(_raw_min_score) if _raw_min_score is not None else 60.0
+
+# Maximum number of job results to show the user after filtering.
+_raw_max_results = _env("MAX_SEARCH_RESULTS")
+MAX_SEARCH_RESULTS: int = int(_raw_max_results) if _raw_max_results is not None else 10
+
+# Default job boards to search (comma-separated). Options: indeed, linkedin, google, glassdoor, zip_recruiter, bayt, naukri
+JOBSPY_SITES: list[str] = [s.strip() for s in (_env("JOBSPY_SITES") or "indeed,linkedin,google").split(",")]
+
+# Default country for Indeed/Glassdoor searches
+JOBSPY_COUNTRY: str = _env("JOBSPY_COUNTRY") or "USA"
+
+# Proxy list for JobSpy (comma-separated, optional)
+_raw_proxies = _env("JOBSPY_PROXIES")
+JOBSPY_PROXIES: list[str] | None = [p.strip() for p in _raw_proxies.split(",")] if _raw_proxies else None
+
+# ---------------------------------------------------------------------------
 # Validation — runs on import
 # ---------------------------------------------------------------------------
 
@@ -178,7 +199,6 @@ def _validate() -> None:
         "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
         "TELEGRAM_CHAT_ID": TELEGRAM_CHAT_ID,
         "GMAIL_MCP_URL": GMAIL_MCP_URL,
-        "INDEED_MCP_TOKEN": INDEED_MCP_TOKEN,
         "GITHUB_URL": GITHUB_URL,
         "APPLICANT_NAME": APPLICANT_NAME,
     }
