@@ -19,6 +19,19 @@ This file uses async handlers because python-telegram-bot requires it.
 This is one of the two allowed async exceptions per CLAUDE.md.
 """
 
+# ---------------------------------------------------------------------------
+# Prevent double-import when run as __main__
+# When this file runs as `python -m bot.telegram_bot`, Python loads it as
+# __main__. Later, `from bot.telegram_bot import ...` would create a SECOND
+# copy with separate globals (_pending_interrupt, etc.). This ensures only
+# one copy exists.
+# ---------------------------------------------------------------------------
+import sys as _sys
+if __name__ == "__main__" and "bot.telegram_bot" not in _sys.modules:
+    _sys.modules["bot.telegram_bot"] = _sys.modules[__name__]
+
+
+
 import asyncio
 import re
 import concurrent.futures
@@ -123,7 +136,7 @@ def _run_async(coro):
 
 def _escape_html(text: str) -> str:
     """Escape HTML special characters in user-provided text."""
-    return html.escape(text)
+    return html.escape(text or "Unknown")
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +208,37 @@ def send_photo(photo_path: str, caption: str = "") -> None:
         if caption:
             send_notification(caption)
 
+
+
+
+def send_document(pdf_path: str, caption: str = "") -> None:
+    """Send a PDF document to the user via Telegram (sync helper).
+
+    Same pattern as send_notification() — best-effort, never crashes.
+    """
+    try:
+        bot = _get_bot()
+        chat_id = _get_chat_id()
+        file_path = Path(pdf_path)
+        if not file_path.exists():
+            logger.warning("send_document: file not found: %s", pdf_path)
+            send_notification(f"⚠️ File not found: {file_path.name}")
+            return
+
+        async def _send():
+            with open(file_path, "rb") as f:
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=f,
+                    filename=file_path.name,
+                    caption=caption[:1024] if caption else None,
+                    parse_mode="HTML",
+                )
+
+        _run_async(_send())
+        logger.info("Sent document: %s", file_path.name)
+    except Exception as exc:
+        logger.error("send_document failed: %s", exc, exc_info=True)
 
 def send_job_card(company: str, role: str, score: float, route: str) -> None:
     """Send a job card notification when the pipeline starts processing."""
@@ -362,6 +406,71 @@ def send_takeover_instructions(session_id: str, screenshot_path: str | None = No
     send_notification("Tap <b>Done</b> when you've resolved the issue.", reply_markup=markup)
 
 
+
+
+def request_interrupt(
+    interrupt_type: str,
+    message: str,
+    buttons: list[dict] | None = None,
+    timeout: int = 300,
+) -> str | None:
+    """Block the calling thread until the user responds via Telegram.
+
+    Used by pipeline.py for Gate 1 (resume review) and Gate 2 (send review).
+
+    Parameters
+    ----------
+    interrupt_type : str
+        Identifier like "resume_review" or "send_review".
+    message : str
+        HTML-formatted message to display.
+    buttons : list[dict] or None
+        List of button dicts with "text" and "callback_data" keys.
+        If None, waits for a free-text reply.
+    timeout : int
+        Seconds to wait before timing out (default 300).
+
+    Returns
+    -------
+    str or None
+        The callback_data of the tapped button, or the text reply.
+        None if timed out.
+    """
+    global _pending_interrupt
+
+    with _interrupt_lock:
+        _pending_interrupt = {
+            "event": threading.Event(),
+            "response": None,
+            "type": interrupt_type,
+        }
+
+    if buttons:
+        keyboard_buttons = [
+            [InlineKeyboardButton(text=btn["text"], callback_data=btn["callback_data"])]
+            for btn in buttons
+        ]
+        markup = InlineKeyboardMarkup(keyboard_buttons)
+        send_notification(message, reply_markup=markup)
+    else:
+        send_notification(message)
+
+    event = _pending_interrupt["event"]
+    event.wait(timeout=timeout)
+
+    with _interrupt_lock:
+        if not event.is_set():
+            _pending_interrupt = None
+            logger.warning("request_interrupt(%s) timed out after %ds", interrupt_type, timeout)
+            return None
+
+        response = _pending_interrupt["response"]
+        _pending_interrupt = None
+
+    logger.info("request_interrupt(%s) got response: %s", interrupt_type, response)
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Mode 2 — Async handlers for the long-running bot
 # ---------------------------------------------------------------------------
@@ -521,31 +630,27 @@ async def _handle_apply(update: Update, context) -> None:
         parse_mode="HTML",
     )
 
-    # Trigger pipeline in background thread
-    # TODO: Wire to pipeline.py in Step 25
-    # Expected integration:
-    #   import threading
-    #   from pipeline import run_pipeline
-    #   if input_type == "url":
-    #       t = threading.Thread(target=run_pipeline, kwargs={"url": job_url}, daemon=True)
-    #   else:
-    #       t = threading.Thread(target=run_pipeline, kwargs={"jd_text": raw_input}, daemon=True)
-    #   t.start()
-
     logger.info(
         "Received /apply command (type=%s, length=%d chars)",
         input_type,
         len(raw_input),
     )
 
-    # Temporary acknowledgement until pipeline.py is wired
-    await update.message.reply_text(
-        "🚧 <b>Pipeline not yet wired.</b>\n\n"
-        "The /apply command is ready — it will trigger the full pipeline "
-        "once <code>pipeline.py</code> (Step 25) is implemented.\n\n"
-        f"Detected input type: <b>{input_type}</b>",
-        parse_mode="HTML",
-    )
+    # Trigger pipeline in background thread
+    def _run_pipeline_thread():
+        from pipeline import run_pipeline
+        try:
+            if input_type == "url":
+                run_pipeline(url=job_url, source="telegram")
+            else:
+                run_pipeline(jd_text=raw_input, source="telegram")
+        except Exception as exc:
+            logger.error("Pipeline failed: %s", exc, exc_info=True)
+            send_notification(f"❌ Pipeline error: {html.escape(str(exc))}")
+
+    t = threading.Thread(target=_run_pipeline_thread, daemon=True)
+    t.start()
+    logger.info("Pipeline thread started for /apply (type=%s)", input_type)
 
 
 # ---------------------------------------------------------------------------
@@ -733,11 +838,11 @@ async def _handle_callback(update: Update, context) -> None:
                         details = get_job_details(job.get("url", ""))
                         full_jd = details.get("description", "")
 
-                    # TODO: Wire to pipeline.py run_pipeline(jd_input=full_jd, source="telegram")
-                    send_notification(
-                        f"📥 <b>Application queued</b>\n\n"
-                        f"<b>{title}</b> at <b>{company}</b>\n\n"
-                        f"Full JD fetched ({len(full_jd)} chars). Pipeline wiring pending Step 25."
+                    from pipeline import run_pipeline
+                    run_pipeline(
+                        jd_text=full_jd,
+                        url=job.get("url", ""),
+                        source="search",
                     )
                 except Exception as exc:
                     logger.error("Apply from search failed: %s", exc, exc_info=True)
@@ -746,6 +851,37 @@ async def _handle_callback(update: Update, context) -> None:
             threading.Thread(target=_apply_from_search, daemon=True).start()
         else:
             await query.answer("Job not found in cache. Search again.")
+        return
+
+    # --- Handle gate callbacks (pipeline approval gates) ---
+    if data.startswith("gate1_") or data.startswith("gate2_"):
+        handled = False
+        with _interrupt_lock:
+            if _pending_interrupt is not None:
+                _pending_interrupt["response"] = data
+                _pending_interrupt["event"].set()
+                handled = True
+
+        if handled:
+            # Annotate the original message with the user's choice
+            choice_label = {
+                "gate1_approve": "✅ Approved",
+                "gate1_regenerate": "✏️ Regenerate",
+                "gate1_cancel": "❌ Cancelled",
+                "gate2_send": "📤 Sending",
+                "gate2_cancel": "❌ Cancelled",
+            }.get(data, data)
+
+            await query.answer(choice_label)
+            try:
+                await query.edit_message_text(
+                    query.message.text_html + f"\n\n<b>{choice_label}</b>",
+                    parse_mode="HTML",
+                )
+            except telegram.error.TelegramError:
+                pass
+        else:
+            await query.answer("No active gate prompt.")
         return
 
     # --- Handle yes/no/done callbacks (interrupt system) ---

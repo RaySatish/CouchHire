@@ -1,15 +1,18 @@
-"""Gmail draft creation via MCP server.
+"""Gmail draft creation and sending via MCP server.
 
 CouchHire is an MCP *client*. This module connects to an external Gmail MCP
 server (configured via GMAIL_MCP_URL), calls its ``create_draft`` tool, and
 returns a Gmail deeplink URL so the user can review and send manually.
 
-**Draft-only policy:** There is no ``send()`` function in this module or
-anywhere in the codebase. Every code path creates a draft — never sends.
+After Gate 2 approval, ``send_draft()`` sends the draft via the MCP server's
+``send_draft`` (or ``drafts/send``) tool.
 """
+
+from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 from pathlib import Path
 
@@ -34,7 +37,7 @@ async def _create_draft_via_mcp(
     subject: str,
     body: str,
     recipient: str,
-    pdf_path: str | None,
+    attachments: list[str],
 ) -> str:
     """Connect to the Gmail MCP server and create a draft. Returns the draft ID.
 
@@ -46,8 +49,8 @@ async def _create_draft_via_mcp(
         Email body (plain text).
     recipient : str
         Recipient email address. May be empty for manual-route applications.
-    pdf_path : str or None
-        Absolute path to the resume PDF to attach. ``None`` means no attachment.
+    attachments : list[str]
+        List of file paths to attach (PDFs). Empty list means no attachments.
 
     Returns
     -------
@@ -71,26 +74,41 @@ async def _create_draft_via_mcp(
     if recipient:
         tool_args["to"] = recipient
 
-    # Attach the PDF if a path was provided and the file exists
-    if pdf_path is not None:
-        pdf_file = Path(pdf_path)
+    # Attach files — encode each as base64
+    # For single attachment, use the flat keys the MCP server expects.
+    # For multiple, use an attachments list if the server supports it.
+    valid_attachments: list[dict] = []
+    for file_path in attachments:
+        pdf_file = Path(file_path)
         if pdf_file.exists() and pdf_file.is_file():
             pdf_bytes = pdf_file.read_bytes()
-            tool_args["attachment"] = base64.b64encode(pdf_bytes).decode("utf-8")
-            tool_args["attachment_name"] = pdf_file.name
-            tool_args["attachment_mime_type"] = "application/pdf"
-            logger.info("Attaching PDF: %s (%d bytes)", pdf_file.name, len(pdf_bytes))
+            valid_attachments.append({
+                "content": base64.b64encode(pdf_bytes).decode("utf-8"),
+                "name": pdf_file.name,
+                "mime_type": "application/pdf",
+            })
+            logger.info("Attaching file: %s (%d bytes)", pdf_file.name, len(pdf_bytes))
         else:
             logger.warning(
-                "PDF path provided but file not found: %s — creating draft without attachment",
-                pdf_path,
+                "Attachment path provided but file not found: %s — skipping",
+                file_path,
             )
 
+    if len(valid_attachments) == 1:
+        # Single attachment — use flat keys for broader MCP server compatibility
+        tool_args["attachment"] = valid_attachments[0]["content"]
+        tool_args["attachment_name"] = valid_attachments[0]["name"]
+        tool_args["attachment_mime_type"] = valid_attachments[0]["mime_type"]
+    elif len(valid_attachments) > 1:
+        # Multiple attachments — try list format first, fall back to first-only
+        tool_args["attachments"] = valid_attachments
+
     logger.info(
-        "Connecting to Gmail MCP server at %s to create draft (to=%s, subject=%s)",
+        "Connecting to Gmail MCP server at %s to create draft (to=%s, subject=%s, attachments=%d)",
         GMAIL_MCP_URL,
         recipient or "(blank)",
         subject,
+        len(valid_attachments),
     )
 
     try:
@@ -108,8 +126,6 @@ async def _create_draft_via_mcp(
         ) from exc
 
     # Extract draft_id from the result.
-    # The MCP server may return the ID in different shapes depending on the
-    # implementation (plain string, dict with "draft_id", or result.content).
     draft_id = _extract_draft_id(result)
 
     if not draft_id:
@@ -119,6 +135,66 @@ async def _create_draft_via_mcp(
 
     logger.info("Gmail draft created — draft_id=%s", draft_id)
     return draft_id
+
+
+async def _send_draft_via_mcp(draft_id: str) -> bool:
+    """Connect to the Gmail MCP server and send an existing draft.
+
+    Parameters
+    ----------
+    draft_id : str
+        The Gmail draft ID to send.
+
+    Returns
+    -------
+    bool
+        True if the draft was sent successfully.
+
+    Raises
+    ------
+    RuntimeError
+        If the MCP server returns an error.
+    ConnectionError
+        If the MCP server is unreachable.
+    """
+    logger.info(
+        "Connecting to Gmail MCP server at %s to send draft (draft_id=%s)",
+        GMAIL_MCP_URL,
+        draft_id,
+    )
+
+    try:
+        async with streamablehttp_client(GMAIL_MCP_URL) as (read_stream, write_stream, _):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                logger.debug("MCP session initialised — calling send_draft tool")
+
+                # Try common MCP server tool names for sending a draft
+                result = None
+                for tool_name in ("send_draft", "drafts_send", "gmail_send_draft"):
+                    try:
+                        result = await session.call_tool(
+                            tool_name, {"draft_id": draft_id}
+                        )
+                        logger.debug("MCP %s raw result: %s", tool_name, result)
+                        break
+                    except Exception as exc:
+                        logger.debug("Tool %s not available: %s", tool_name, exc)
+                        continue
+
+                if result is None:
+                    raise RuntimeError(
+                        f"No send_draft tool found on Gmail MCP server at {GMAIL_MCP_URL}. "
+                        "Tried: send_draft, drafts_send, gmail_send_draft"
+                    )
+
+    except OSError as exc:
+        raise ConnectionError(
+            f"Cannot reach Gmail MCP server at {GMAIL_MCP_URL}: {exc}"
+        ) from exc
+
+    logger.info("Gmail draft sent — draft_id=%s", draft_id)
+    return True
 
 
 def _extract_draft_id(result: object) -> str | None:
@@ -136,7 +212,6 @@ def _extract_draft_id(result: object) -> str | None:
                 # Some servers return JSON like {"draftId": "..."}
                 if text.startswith("{"):
                     try:
-                        import json
                         data = json.loads(text)
                         for key in ("draftId", "draft_id", "id"):
                             if key in data:
@@ -161,19 +236,39 @@ def _extract_draft_id(result: object) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Sync bridge helper
+# ---------------------------------------------------------------------------
+
+def _run_async(coro):
+    """Run an async coroutine from sync context, handling existing event loops."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None:
+        # Already inside an async context — run in a thread pool
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    else:
+        return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
 # Public sync interface (called by the pipeline)
 # ---------------------------------------------------------------------------
 
 def create_draft(
     subject: str,
     body: str,
-    pdf_path: str | None,
     recipient_email: str,
-) -> str:
-    """Create a Gmail draft via the MCP server. Returns the Gmail draft deeplink URL.
+    attachments: list[str] | None = None,
+    pdf_path: str | None = None,
+) -> tuple[str, str]:
+    """Create a Gmail draft via the MCP server. Returns (draft_url, draft_id).
 
-    This is the only public function in this module. It is synchronous —
-    the async MCP calls are wrapped internally.
+    This is synchronous — the async MCP calls are wrapped internally.
 
     Parameters
     ----------
@@ -181,15 +276,17 @@ def create_draft(
         Email subject line.
     body : str
         Email body text.
-    pdf_path : str or None
-        Path to the resume PDF to attach, or None for no attachment.
     recipient_email : str
         Recipient email address. Pass empty string for manual-route applications.
+    attachments : list[str] or None
+        List of file paths to attach. Preferred parameter for multiple files.
+    pdf_path : str or None
+        Legacy single-file parameter. Used if attachments is None.
 
     Returns
     -------
-    str
-        Gmail draft deeplink URL (``https://mail.google.com/mail/u/0/#drafts/<id>``).
+    tuple[str, str]
+        (draft_url, draft_id) — Gmail deeplink URL and the raw draft ID.
 
     Raises
     ------
@@ -198,28 +295,42 @@ def create_draft(
     RuntimeError
         If the MCP server returns an error or no draft ID.
     """
-    # Use asyncio.run() to bridge sync → async.
-    # This is safe because gmail_sender is only called from the synchronous
-    # LangGraph pipeline, which does not have a running event loop.
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
+    # Build attachments list from either parameter
+    attachment_list: list[str] = []
+    if attachments is not None:
+        attachment_list = [a for a in attachments if a]
+    elif pdf_path is not None:
+        attachment_list = [pdf_path]
 
-    if loop is not None:
-        # We're already inside an async context (shouldn't happen in normal
-        # pipeline flow, but handle gracefully for tests / notebooks).
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            draft_id = pool.submit(
-                asyncio.run,
-                _create_draft_via_mcp(subject, body, recipient_email, pdf_path),
-            ).result()
-    else:
-        draft_id = asyncio.run(
-            _create_draft_via_mcp(subject, body, recipient_email, pdf_path)
-        )
+    draft_id = _run_async(
+        _create_draft_via_mcp(subject, body, recipient_email, attachment_list)
+    )
 
     draft_url = _GMAIL_DRAFT_URL_TEMPLATE.format(draft_id=draft_id)
     logger.info("Draft URL: %s", draft_url)
-    return draft_url
+    return draft_url, draft_id
+
+
+def send_draft(draft_id: str) -> bool:
+    """Send an existing Gmail draft via the MCP server.
+
+    Called by the pipeline after Gate 2 approval.
+
+    Parameters
+    ----------
+    draft_id : str
+        The Gmail draft ID (returned by create_draft()).
+
+    Returns
+    -------
+    bool
+        True if the draft was sent successfully.
+
+    Raises
+    ------
+    ConnectionError
+        If the Gmail MCP server is unreachable.
+    RuntimeError
+        If the MCP server returns an error or no send tool is found.
+    """
+    return _run_async(_send_draft_via_mcp(draft_id))

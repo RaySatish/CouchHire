@@ -1,0 +1,96 @@
+%% Cover Letter Template — compile with xelatex
+\documentclass[11pt,a4paper]{article}
+
+%% ─── Fonts (requires XeLaTeX) ───────────────────────────────────────
+\usepackage{fontspec}
+\setmainfont{SourceSansPro}[
+  Path           = fonts/,
+  Extension      = .otf,
+  UprightFont    = *-Regular,
+  BoldFont       = *-Bold,
+  ItalicFont     = *-Italic,
+  BoldItalicFont = *-BoldItalic
+]
+
+%% ─── Packages ────────────────────────────────────────────────────────
+\usepackage[margin=0.75in]{geometry}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{tabularx}
+\usepackage{parskip}
+
+%% ─── Colours ─────────────────────────────────────────────────────────
+\definecolor{UIBlue}{RGB}{52,103,172}
+
+%% ─── Hyperref setup ─────────────────────────────────────────────────
+\hypersetup{
+  colorlinks  = true,
+  urlcolor    = UIBlue,
+  linkcolor   = UIBlue
+}
+
+%% ─── No page numbers ────────────────────────────────────────────────
+\pagestyle{empty}
+
+%% ─── Document ────────────────────────────────────────────────────────
+\begin{document}
+
+%% ── Three-column header ─────────────────────────────────────────────
+\begin{tabularx}{\textwidth}{@{} X c X @{}}
+  % Left column — contact details
+  \begin{tabular}[t]{@{}l@{}}
+    \textcolor{UIBlue}{\small {{APPLICANT_PHONE}}} \\[2pt]
+    \textcolor{UIBlue}{\small {{APPLICANT_EMAIL}}}
+  \end{tabular}
+  &
+  % Centre column — name and target role
+  \begin{tabular}[t]{c}
+    {\Large\bfseries\textcolor{UIBlue}{ {{APPLICANT_NAME}} }} \\[4pt]
+    {\normalsize\textcolor{UIBlue}{ {{TARGET_ROLE}} }}
+  \end{tabular}
+  &
+  % Right column — links
+  \begin{tabular}[t]{@{}r@{}}
+    \href{ {{LINKEDIN_URL}} }{\small\textcolor{UIBlue}{ {{LINKEDIN_TEXT}} }} \\[2pt]
+    \href{ {{PORTFOLIO_URL}} }{\small\textcolor{UIBlue}{ {{PORTFOLIO_TEXT}} }}
+  \end{tabular}
+\end{tabularx}
+
+%% ── Horizontal rule ─────────────────────────────────────────────────
+\vspace{6pt}
+{\color{UIBlue}\hrule height 1.2pt}
+\vspace{12pt}
+
+%% ── Cover Letter heading ────────────────────────────────────────────
+\begin{center}
+  {\large\bfseries\textcolor{UIBlue}{COVER LETTER}}
+\end{center}
+
+\vspace{8pt}
+
+%% ── Date (right-aligned) ────────────────────────────────────────────
+\hfill \today
+
+\vspace{12pt}
+
+%% ── Salutation ──────────────────────────────────────────────────────
+Dear {{RECIPIENT}},
+
+\vspace{6pt}
+
+%% ── Body ────────────────────────────────────────────────────────────
+{{BODY}}
+
+\vspace{18pt}
+
+%% ── Closing ─────────────────────────────────────────────────────────
+Yours Faithfully,
+
+\vspace{24pt}
+
+%% ── Signature block ─────────────────────────────────────────────────
+\textbf{ {{APPLICANT_NAME}} } \\
+{{APPLICANT_PHONE}} \\
+{{APPLICANT_EMAIL}}
+
+\end{document}

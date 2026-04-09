@@ -662,7 +662,7 @@ def _handle_complex_blocker(blocker: dict, session_id: str) -> str:
 # Main public function
 # ---------------------------------------------------------------------------
 
-def fill_form(url: str, documents: dict) -> dict:
+def fill_form(url: str, documents: dict, submit: bool = True) -> dict:
     """Fill an ATS application form using LLM-assisted field mapping.
 
     Semi-autonomous: fills what it can, asks the user (via Telegram stubs)
@@ -780,6 +780,12 @@ def fill_form(url: str, documents: dict) -> dict:
 
             try:
                 if submit_btn.is_visible(timeout=2000):
+                    if not submit:
+                        # submit=False: stop before clicking submit (Gate 2 review)
+                        logger.info("Submit button found. submit=False — stopping for review.")
+                        status = "partially_filled"
+                        break
+
                     # DON'T auto-submit — flag for user confirmation
                     logger.info("Submit button found. NOT auto-submitting.")
                     from bot.telegram_bot import ask_yes_no
@@ -826,4 +832,83 @@ def fill_form(url: str, documents: dict) -> dict:
 
     result = {"status": status, "url": final_url, "notes": notes}
     logger.info("Form fill result: %s", result)
+    return result
+
+def submit_form(session_id: str | None = None) -> dict:
+    """Click the submit button on an already-filled ATS form.
+
+    Called by the pipeline's execute_send node after Gate 2 approval.
+    Connects to the existing browser session (launched by fill_form with
+    submit=False) and clicks the submit button.
+
+    Parameters
+    ----------
+    session_id : str or None
+        The browser session ID. If None, uses the default session.
+
+    Returns
+    -------
+    dict
+        Result with keys: status, url, notes.
+    """
+    from apply.session_handoff import get_cdp_url, close_browser
+    from playwright.sync_api import sync_playwright
+
+    session_id = session_id or "default"
+    status = "failed"
+    final_url = ""
+    notes = ""
+
+    try:
+        cdp_url = get_cdp_url(session_id)
+        if not cdp_url:
+            return {
+                "status": "failed",
+                "url": "",
+                "notes": "No active browser session found for submit.",
+            }
+
+        pw = sync_playwright().start()
+        browser = pw.chromium.connect_over_cdp(cdp_url)
+        context = browser.contexts[0] if browser.contexts else browser.new_context()
+        page = context.pages[0] if context.pages else context.new_page()
+
+        # Look for submit button
+        submit_btn = page.locator(
+            "button:has-text('Submit'), button:has-text('Apply'), "
+            "input[type='submit'], button[type='submit']"
+        ).first
+
+        try:
+            if submit_btn.is_visible(timeout=3000):
+                logger.info("Clicking submit button (Gate 2 approved).")
+                submit_btn.click()
+                page.wait_for_load_state("networkidle", timeout=15000)
+                status = "submitted"
+                final_url = page.url
+                notes = "Form submitted after Gate 2 approval."
+            else:
+                status = "failed"
+                final_url = page.url
+                notes = "Submit button not visible."
+        except Exception as exc:
+            status = "failed"
+            final_url = page.url
+            notes = f"Submit click failed: {exc}"
+
+        browser.close()
+        pw.stop()
+
+    except Exception as exc:
+        logger.error("submit_form failed: %s", exc, exc_info=True)
+        notes = f"Error: {exc}"
+
+    finally:
+        try:
+            close_browser(session_id)
+        except Exception:
+            pass
+
+    result = {"status": status, "url": final_url, "notes": notes}
+    logger.info("submit_form result: %s", result)
     return result

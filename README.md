@@ -64,55 +64,61 @@ CouchHire is a fully agentic job application pipeline. Paste a job description, 
 
 ```
 couchhire/
-├── agents/
+├── agents/           # LangGraph agents + resume generation helpers
 │   ├── jd_parser.py          # JD parsing + requirements extraction → requirements dict
 │   ├── cv_rag.py             # ChromaDB retrieval from master CV → ranked CV sections
 │   ├── match_scorer.py       # NLP match scoring → float 0–100
 │   ├── resume_tailor.py      # LaTeX resume tailoring → compiled PDF path
-│   ├── llm_selector.py       # LLM-driven content selection + instruction enforcement
-│   ├── resume_assembler.py   # LaTeX block extraction + itemize wrapper utilities
-│   ├── cv_content_helpers.py # Section → named block extraction + content inventory builder
-│   ├── cover_letter.py       # Cover letter generation (conditional) → string
+│   ├── llm_selector.py       # LLM-driven content selection + instruction enforcement (internal helper)
+│   ├── resume_assembler.py   # LaTeX block extraction + itemize wrapper utilities (internal helper)
+│   ├── cv_content_helpers.py # Section → named block extraction + content inventory builder (internal helper)
+│   ├── cover_letter.py       # Cover letter generation (conditional, receives resume_content) → string
 │   ├── email_drafter.py      # Email draft generation → subject + body strings
 │   └── apply_router.py       # Detects email / form / manual route → route string
-├── apply/
-│   ├── gmail_sender.py       # Gmail MCP integration → sends email with PDF attachment
+├── apply/            # Gmail draft creator (MCP client), Playwright browser agent, session handoff
+│   ├── gmail_sender.py       # MCP client: create_draft() + send_draft() — draft-only by default
 │   ├── browser_agent.py      # Semi-autonomous ATS form filler (LLM field mapping + blocker detection + Telegram interrupts)
 │   └── session_handoff.py    # CDP session manager (launches Chromium with --remote-debugging-port for Playwright + manual takeover)
-├── bot/
-│   └── telegram_bot.py       # Inbound/outbound Telegram notifications and buttons
-├── dashboard/
+├── bot/              # Telegram bot
+│   └── telegram_bot.py       # Notifications, /outcome, /search, /apply, gate handlers
+├── jobs/             # JobSpy job search + CV-based filtering
+│   ├── job_search.py         # JobSpy wrapper: multi-board concurrent search (Indeed, LinkedIn, Google, ZipRecruiter)
+│   └── job_filter.py         # Score + filter results against user's CV
+├── dashboard/        # Streamlit app (Step 26 — not yet built)
 │   └── app.py                # Streamlit dashboard (reads from Supabase)
-├── db/
-│   ├── supabase_client.py    # Supabase read/write helpers
-│   └── schema.sql            # Full CREATE TABLE statement — run this first in Supabase
-├── nlp/
+├── db/               # Supabase client + schema
+│   ├── supabase_client.py    # CRUD helpers for applications table
+│   ├── schema.sql            # Full CREATE TABLE (idempotent) — run this first in Supabase
+│   └── create_tables.py      # One-time table creation script (direct Postgres or Management API fallback)
+├── nlp/              # spaCy NER model + retrain loop
 │   ├── ner_model.py          # spaCy NER for JD skill extraction
-│   └── retrain.py            # Auto-retraining loop (fires every 10 new outcome labels)
-├── llm/
-│   └── client.py             # LiteLLM wrapper — all LLM calls go through here
+│   └── retrain.py            # Fine-tune match scorer on outcome labels (auto-triggers every N labels)
+├── llm/              # LiteLLM wrapper (all LLM calls go through here)
+│   └── client.py             # complete() with 9-model fallback chain across 5 providers
 ├── cv/
 │   ├── uploads/              # User's personal files — gitignored
 │   │   ├── master_cv.*       # .tex, .pdf, or .docx — any format accepted
-│   │   ├── resume_template.tex  # Optional custom LaTeX template
-│   │   └── instructions.md   # Optional tailoring preferences
+│   │   ├── resume_template.tex       # Optional custom LaTeX template
+│   │   ├── cover_letter_template.tex # Optional custom cover letter template
+│   │   └── instructions.md  # Optional tailoring preferences
 │   ├── chroma_store/         # ChromaDB embeddings — gitignored
-│   ├── output/               # Compiled PDFs — gitignored
+│   ├── output/               # Compiled PDFs + .tex intermediates — gitignored
 │   ├── embed_cv.py           # Orchestrates parse → embed pipeline
 │   ├── cv_parser.py          # Parses .tex/.pdf/.docx into named sections
-│   └── defaults/             # Fallback template and instructions — committed
+│   └── defaults/             # Fallback templates and instructions — committed
 │       ├── resume_template.tex
+│       ├── cover_letter_template.tex  # XeLaTeX template with {{PLACEHOLDER}} markers
 │       └── instructions.md
-├── pipeline.py               # LangGraph orchestrator — main entry point
+├── pipeline.py               # LangGraph orchestrator — main entry point (19 nodes, 6 conditional edges)
 ├── generate_resume.py        # Standalone resume generator CLI (skips email/Telegram)
 ├── config.py                 # Reads .env, validates all keys on startup, exposes config
 ├── .env                      # Your secrets — never committed to git
 ├── .env.example              # Template with all variable names — committed to git
 ├── .gitignore                # Excludes .env, cv/uploads/, cv/chroma_store/, cv/output/, compiled PDFs
-├── docker-compose.yml        # One-command alternative to manual setup
-├── Dockerfile                # Container definition for the main app
 ├── requirements.txt          # Pinned Python dependencies
-└── README.md
+├── tests/                    # pytest suite (test_step25, test_llm_selector, test_skills_assembly, etc.)
+├── test_jds/                 # Sample JDs for testing (7 role types)
+└── docker-compose.yml        # (Step 28 — not yet built)
 ```
 
 ---
@@ -157,9 +163,10 @@ This section is intentionally precise so that each module has a clear contract. 
 - **Intermediate file:** `cv/output/tailored_<timestamp>.tex` (gitignored)
 
 ### `agents/cover_letter.py`
-- **Input:** `requirements`, `cv_sections`
-- **Output:** `cover_letter_text` (str) — 3 paragraphs
+- **Input:** `requirements`, `cv_sections`, `resume_content` (structured summary from resume_tailor — what was emphasised)
+- **Output:** `cover_letter_text` (str) — complements resume, never repeats it
 - **Only runs if:** `requirements["cover_letter_required"] == True`
+- **Constraint:** prompt explicitly instructs "ONLY reference what the resume covers" and "DO NOT repeat bullet points" — the cover letter adds depth, narrative, and motivation
 - **LLM call:** yes — uses `llm/client.py`
 
 ### `agents/email_drafter.py`
@@ -174,8 +181,10 @@ This section is intentionally precise so that each module has a clear contract. 
 - **No LLM call** — deterministic routing logic only
 
 ### `apply/gmail_sender.py`
-- **Input:** `email_subject`, `email_body`, `resume_pdf_path`, `apply_target`
-- **Action:** sends email via Gmail MCP with PDF attached
+- **Input:** `email_subject`, `email_body`, `resume_pdf_path`, `apply_target`, optional `cover_letter_pdf_path`
+- **`create_draft()`:** creates Gmail draft via MCP server with resume PDF (and cover letter PDF if present) attached — returns `(draft_url, draft_id)`
+- **`send_draft()`:** sends an existing draft by `draft_id` via MCP — only called after Gate 2 approval
+- **Draft-only by default** — the pipeline creates a draft, user reviews in Gmail, Gate 2 approval triggers send
 - **No LLM call**
 
 ### `apply/browser_agent.py`
@@ -471,12 +480,19 @@ GITHUB_URL=https://github.com/your-username
 ```
 This is automatically included in every email draft.
 
+**Your email address:**
+```
+APPLICANT_EMAIL=you@example.com
+```
+Used in cover letters, ATS form fields, and email drafts.
+
 **Browser agent variables (optional):**
 ```
 APPLICANT_PHONE=+91 9800155779    # for ATS form fields
 APPLICANT_LINKEDIN=https://linkedin.com/in/your-profile
 FORM_ANSWERS_PATH=cv/uploads/form_answers.json  # default, override if needed
 CDP_PORT=9222                     # Chrome DevTools Protocol port, default 9222
+BROWSER_HEADLESS=false            # run browser agent headless (default false)
 ```
 
 **NLP retraining variables (optional):**
@@ -484,7 +500,13 @@ CDP_PORT=9222                     # Chrome DevTools Protocol port, default 9222
 MIN_RETRAIN_LABELS=10              # minimum labeled outcomes before retraining is allowed
 RETRAIN_EVERY=10                   # auto-retrain every N new labels (0 = manual only)
 ```
-These control the auto-retrain trigger. With defaults, retraining fires when you have at least 10 labels and every 10 new labels after that. Set `RETRAIN_EVERY=0` to disable auto-retrain and use the dashboard Retrain button instead.
+These control the auto-retrain trigger.
+
+**Job search variables (optional):**
+```
+MIN_MATCH_SCORE=60.0               # minimum match % to show in job search results (default 60.0)
+MAX_SEARCH_RESULTS=10              # max jobs to show after filtering in search (default 10)
+``` With defaults, retraining fires when you have at least 10 labels and every 10 new labels after that. Set `RETRAIN_EVERY=0` to disable auto-retrain and use the dashboard Retrain button instead.
 
 The full list of variables is in `.env.example` with a comment explaining each one.
 
@@ -509,20 +531,27 @@ The schema creates one table:
 
 ```sql
 applications (
-  id              uuid primary key default gen_random_uuid(),
-  company         text,
-  role            text,
-  jd_raw          text,
-  requirements    jsonb,         -- structured output from jd_parser.py
-  match_score     float,
-  resume_version  text,
-  resume_latex    text,          -- full .tex source of the tailored resume
+  id              uuid primary key default uuid_generate_v4(),
+  jd_text         text,                    -- raw JD text (nullable — may only have URL initially)
+  jd_url          text,                    -- source URL (Greenhouse, Lever, LinkedIn, etc.)
+  role_input      text,                    -- raw role/title when no full JD provided
+  requirements    jsonb not null default '{}',  -- structured output from jd_parser.py
+  company         text,                    -- denormalised from requirements
+  role            text,                    -- denormalised from requirements
+  match_score     numeric(5,1),            -- 0–100
+  route           text,                    -- 'email' | 'form' | 'manual'
+  resume_pdf_path text,                    -- path to compiled tailored PDF
+  resume_content  text,                    -- plain-text summary of what was emphasised
   cover_letter    text,
-  email_draft     text,
-  apply_route     text,          -- 'email' | 'form' | 'manual'
-  status          text,          -- 'sent' | 'no_reply' | 'screening' | 'interview' | 'rejected' | 'offer'
+  email_subject   text,
+  email_body      text,
+  draft_url       text,                    -- Gmail draft deeplink
+  status          text not null default 'pending',  -- 10-state: pending → scraping → parsing → scoring → below_threshold/tailoring → drafting → awaiting_review → applied → error
+  outcome         text,                    -- interview | rejected | no_response | offer | withdrawn
+  error_message   text,                    -- populated when status = 'error'
+  source          text default 'cli',      -- 'cli' | 'telegram' | 'jobspy'
   applied_at      timestamptz default now(),
-  updated_at      timestamptz default now()
+  updated_at      timestamptz default now()  -- auto-updated via trigger
 )
 ```
 
@@ -538,6 +567,7 @@ CouchHire accepts your master CV in any format — LaTeX, PDF, or Word.
 |---|---|---|
 | `master_cv.tex` / `master_cv.pdf` / `master_cv.docx` | Yes | Your full master CV |
 | `resume_template.tex` | No | Your preferred LaTeX resume layout |
+| `cover_letter_template.tex` | No | Your preferred cover letter layout (XeLaTeX with `{{PLACEHOLDER}}` markers) |
 | `instructions.md` | No | Your tailoring preferences |
 
 If you do not provide a template or instructions, CouchHire uses its own defaults automatically.
@@ -686,16 +716,20 @@ Available at http://localhost:8501 once running.
 ## Roadmap
 
 - [x] Core pipeline (JD parser → resume tailor → email drafter)
-- [x] Telegram bot (notifications + approval buttons + /outcome command + auto-retrain hook)
-- [x] Gmail MCP integration (Step 16 — next)
+- [x] Telegram bot (notifications + approval buttons + /outcome command + /search + /apply + gate handlers + auto-retrain hook)
+- [x] Gmail MCP integration (create_draft + send_draft via MCP client)
 - [x] Semi-autonomous browser agent (LLM-assisted ATS form filling + human-in-the-loop)
 - [x] CDP session management for browser takeover
 - [x] Supabase logging
-- [ ] Streamlit dashboard
 - [x] NLP match scorer + self-improving retraining loop (CosineSimilarityLoss, outcome labels, class balancing)
 - [x] Multi-board job search (JobSpy — Indeed, LinkedIn, Google, Glassdoor, ZipRecruiter)
-- [x] LiteLLM multi-provider support
-- [ ] Docker support
+- [x] LiteLLM 9-model fallback chain across 5 providers
+- [x] Cover letter PDF compilation (XeLaTeX template with placeholder markers)
+- [x] LangGraph pipeline orchestrator (19 nodes, 6 conditional edges, 2 Telegram approval gates, CLI with --jd/--url/--file/--search modes)
+- [x] Integration tests (55/55 passing)
+- [ ] Streamlit dashboard (Step 26 — next)
+- [ ] Full pytest suite (Step 27)
+- [ ] Docker support (Step 28)
 - [ ] Open source release
 
 ---

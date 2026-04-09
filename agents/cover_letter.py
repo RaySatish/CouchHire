@@ -11,7 +11,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ── Tone keywords ────────────────────────────────────────────────────────
+# ── Tone keywords ────────────────────────────────────────────────
 _QUANT_KEYWORDS = {"quant", "trading", "finance"}
 _ML_KEYWORDS = {"ml", "machine learning", "ai", "llm"}
 
@@ -138,7 +138,13 @@ def generate(
         "You are a professional cover letter writer. You produce concise, "
         "compelling cover letters that complement — never duplicate — the "
         "candidate's resume. Output plain text only. No markdown, no headers, "
-        "no salutations, no sign-offs unless they fit naturally."
+        "no salutations, no sign-offs unless they fit naturally. "
+        "CRITICAL CONSTRAINT: The cover letter must ONLY reference projects, "
+        "skills, experiences, and achievements that appear in the provided "
+        "resume content. It must not mention anything that is not on the "
+        "resume. The resume and cover letter are a package — they must be "
+        "consistent. If the resume summary is provided, treat it as the "
+        "definitive list of what can be referenced."
     )
 
     try:

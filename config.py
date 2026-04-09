@@ -89,6 +89,7 @@ GMAIL_MCP_URL: str | None = _env("GMAIL_MCP_URL")
 
 GITHUB_URL: str | None = _env("GITHUB_URL")
 APPLICANT_NAME: str | None = _env("APPLICANT_NAME")
+APPLICANT_EMAIL: str | None = _env("APPLICANT_EMAIL")
 
 # Match threshold — integer 0-100
 _raw_threshold = _env("MATCH_THRESHOLD")
