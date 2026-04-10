@@ -107,7 +107,7 @@ couchhire/
 │   ├── cv_parser.py          # Parses .tex/.pdf/.docx into named sections
 │   └── defaults/             # Fallback templates and instructions — committed
 │       ├── resume_template.tex
-│       ├── cover_letter_template.tex  # XeLaTeX template with {{PLACEHOLDER}} markers
+│       ├── cover_letter_template.tex  # XeLaTeX template with {{PLACEHOLDER}} markers, %%IF_<KEY>%% conditional blocks, %%FONT_PLACEHOLDER%% marker
 │       └── instructions.md
 ├── pipeline.py               # LangGraph orchestrator — main entry point (19 nodes, 6 conditional edges)
 ├── generate_resume.py        # Standalone resume generator CLI (skips email/Telegram)
@@ -161,12 +161,17 @@ This section is intentionally precise so that each module has a clear contract. 
 - **3-tier content resolution per section:** TIER 1 = exact template block, TIER 2 = LLM-reformatted master CV content, TIER 3 = raw master CV fallback
 - **Instruction enforcement:** Role-conditional includes/excludes (e.g. "exclude CouchHire for Quant roles", "include Paper Presentation for Quant roles")
 - **Intermediate file:** `cv/output/tailored_<timestamp>.tex` (gitignored)
+- **Output paths:** `get_output_dir(company, role)` from `config.py` organises output as `<OUTPUT_BASE_DIR>/<Company>/<Role>/Resume.pdf`
+- **`resume_content`:** generated deterministically by parsing the tailored LaTeX (no LLM call) — zero hallucination in the summary passed to `cover_letter.py` and `email_drafter.py`
 
 ### `agents/cover_letter.py`
 - **Input:** `requirements`, `cv_sections`, `resume_content` (structured summary from resume_tailor — what was emphasised)
 - **Output:** `cover_letter_text` (str) — complements resume, never repeats it
 - **Only runs if:** `requirements["cover_letter_required"] == True`
 - **Constraint:** prompt explicitly instructs "ONLY reference what the resume covers" and "DO NOT repeat bullet points" — the cover letter adds depth, narrative, and motivation
+- **Header:** displays `Role - Company` (e.g. `AI/ML Engineer - CouchHire`) via `{{TARGET_ROLE}}` placeholder in the template
+- **Paragraph 2 framing:** sells fit and positioning — answers "why this person for this role", not what they built
+- **Template features:** `%%IF_<KEY>%%...%%ENDIF_<KEY>%%` conditional blocks for optional fields (phone, LinkedIn, portfolio); `%%FONT_PLACEHOLDER%%` for dynamic font selection (Montserrat if available, Helvetica fallback)
 - **LLM call:** yes — uses `llm/client.py`
 
 ### `agents/email_drafter.py`
@@ -525,6 +530,12 @@ CDP_PORT=9222                     # Chrome DevTools Protocol port, default 9222
 BROWSER_HEADLESS=false            # run browser agent headless (default false)
 ```
 
+**Output directory (optional):**
+```
+OUTPUT_BASE_DIR=/path/to/your/output   # defaults to cv/output/
+```
+Output is organised as `OUTPUT_BASE_DIR/<Company>/<Role>/Resume.pdf` and `Cover Letter.pdf`.
+
 **NLP retraining variables (optional):**
 ```
 MIN_RETRAIN_LABELS=10              # minimum labeled outcomes before retraining is allowed
@@ -597,7 +608,7 @@ CouchHire accepts your master CV in any format — LaTeX, PDF, or Word.
 |---|---|---|
 | `master_cv.tex` / `master_cv.pdf` / `master_cv.docx` | Yes | Your full master CV |
 | `resume_template.tex` | No | Your preferred LaTeX resume layout |
-| `cover_letter_template.tex` | No | Your preferred cover letter layout (XeLaTeX with `{{PLACEHOLDER}}` markers) |
+| `cover_letter_template.tex` | No | Your preferred cover letter layout (XeLaTeX with `{{PLACEHOLDER}}` markers, `%%IF_<KEY>%%` conditional blocks, `%%FONT_PLACEHOLDER%%` font marker) |
 | `instructions.md` | No | Your tailoring preferences |
 
 If you do not provide a template or instructions, CouchHire uses its own defaults automatically.
@@ -610,6 +621,8 @@ Add plain English preferences to `cv/uploads/instructions.md`:
 - "Lead with projects for ML roles, lead with experience for quant roles"
 - "Never include GPA"
 - "Use a two-column skills section"
+
+The default `cv/defaults/instructions.md` also includes a **Positioning Philosophy** — lead with outcome not stack, show 2–3 projects max, use impact verbs only. Your custom instructions override or extend these defaults.
 
 ### Step 2 — Embed your CV
 
