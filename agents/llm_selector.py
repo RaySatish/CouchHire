@@ -22,6 +22,17 @@ _SYSTEM_PROMPT = (
     "You are a resume content strategist. Your ONLY job is to SELECT which "
     "existing content to include in a tailored resume and in what ORDER.\n"
     "\n"
+    "═══ CORE SELECTION PHILOSOPHY ═══\n"
+    "The resume must answer ONE question above all else: why is this person "
+    "the right fit for THIS specific role at THIS specific company?\n"
+    "- Lead with relevance. The strongest fit angle comes first.\n"
+    "- Projects are EVIDENCE, not the story. Select projects that prove a "
+    "capability the JD explicitly asks for. Fewer, sharper projects beat a "
+    "full list. Prefer 3 well-chosen projects over 5 generic ones.\n"
+    "- Skills: only categories that map directly to the JD. Cut the rest.\n"
+    "- Sell the candidate — but with specificity, not adjectives. Strong "
+    "selection creates a confident, focused resume without overselling.\n"
+    "\n"
     "═══ ABSOLUTE PRIORITY — MANDATORY USER RULES ═══\n"
     "The prompt below contains a section called \"MANDATORY USER RULES\". "
     "These are NON-NEGOTIABLE constraints set by the resume owner. "
@@ -54,7 +65,7 @@ _SYSTEM_PROMPT = (
     "- If a section should be included in full, set its value to true.\n"
     "- If specific items from a section should be included, list them by "
     "their EXACT names from the inventory.\n"
-    "- Be selective — typically 3-4 projects, not all.\n"
+    "- Be selective — 3 focused projects beats 5 generic ones.\n"
     "- For SKILLS: you select CATEGORIES only. Individual skill items within "
     "categories are filtered separately — do not try to list individual skills."
 )
@@ -159,8 +170,14 @@ IMPORTANT:
 - Item-level filtering (e.g. "do not use Raspberry Pi if not relevant") is handled
   automatically AFTER your selection — you do NOT need to worry about individual
   skills within a category. Focus only on which CATEGORIES to include and their ORDER.
-- For PROJECTS: select 3-5 most relevant projects. Order them with the \
-most relevant first.
+- HEADER TITLE: The resume header must show the role as "{role} - {company}" \
+(e.g. "AI/ML Engineer - CouchHire"). Include this in your rationale so the \
+assembler knows to use this format.
+- FIT-FIRST ORDERING: Order projects so the one that most directly proves \
+fit for THIS role comes first. Ask: which project best answers "why this \
+candidate for this role?" — that goes to position 1.
+- For PROJECTS: select 3-4 most relevant projects. Fewer sharp picks beat \
+a full list. Each selected project must prove a capability the JD asks for.
 - For EXPERIENCE: select relevant entries. If only 1 exists, include it.
 - For CERTIFICATIONS: select the most relevant ones.
 - For LEADERSHIP: include if space allows and entries are relevant.

@@ -58,7 +58,7 @@ def _build_body_prompt(
 
     # ── Example email for tone and structure ──
     example = (
-        "Here is an EXAMPLE of the exact tone and structure I want "
+        "Here is an EXAMPLE of the exact tone and structure I want, this is just the type of sentiment i want to give "
         "(do NOT copy this content — use the candidate's actual resume context below):\n\n"
         "---\n"
         "Hi,\n\n"
@@ -150,6 +150,8 @@ def _build_body_prompt(
         "- Sound like a real person wrote this — conversational, confident, not corporate\n"
         "- Reference SPECIFIC projects and tech from the RESUME CONTEXT — "
         "do not be vague or generic\n"
+        "- CRITICAL: Do NOT mention any project, skill, or technology that is not "
+        "explicitly listed in the RESUME CONTEXT above. No exceptions.\n"
         "- Keep it between 100 and 180 words (including signature)\n"
         "- Do NOT use any asterisks (*) anywhere in the output"
     )
@@ -187,10 +189,13 @@ def draft(
 
     system_prompt = (
         "You are writing a job application email on behalf of a real person. "
+        "ABSOLUTE RULE: Only reference projects, skills, technologies, and "
+        "experiences that are explicitly listed in the RESUME CONTEXT provided "
+        "in the prompt. Do NOT invent or add any detail — no extra technologies, "
+        "no skills not listed, no project features not described. If it is not "
+        "in the RESUME CONTEXT, it does not exist. "
         "Write like a human — casual-professional, not corporate or stiff. "
-        "Think of how a confident student would email about a job they're excited about. "
-        "No buzzwords, no filler phrases like 'I am writing to express my interest'. "
-        "Be specific — reference actual projects and tech, not vague claims. "
+        "No buzzwords, no filler phrases. "
         "Plain text only. No markdown. No asterisks. No bold. No bullet points. "
         "Output only the email body."
     )

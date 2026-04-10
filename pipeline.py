@@ -475,6 +475,7 @@ def node_compile_cover_letter_pdf(state: PipelineState) -> PipelineState:
     import shutil
 
     logger.info("▶ node_compile_cover_letter_pdf")
+    print("\n\n=== DEBUG: node_compile_cover_letter_pdf ENTERED ===\n")
 
     cl_text = state.get("cover_letter_text")
     if not cl_text:
@@ -496,17 +497,46 @@ def node_compile_cover_letter_pdf(state: PipelineState) -> PipelineState:
     template_src = tpl_path.read_text(encoding="utf-8")
 
     # --- Font fallback ---
-    # If template uses fontspec with local fonts/ dir but fonts are missing,
-    # replace with a system font so xelatex does not fail.
+    # Handle %%FONT_PLACEHOLDER%% marker (user template) or inline \setmainfont
+    # When fonts/ dir is missing, replace with a system font.
     fonts_dir = tpl_path.parent / "fonts"
-    if not fonts_dir.is_dir() and "\\setmainfont" in template_src:
+    _font_fallback = r"\setmainfont{Helvetica}"
+
+    if "%%FONT_PLACEHOLDER%%" in template_src:
+        # User template uses a marker — check if fonts are available
+        _font_src_dir = project_root / "cv" / "uploads" / "fonts"
+        if _font_src_dir.is_dir():
+            # Use SourceSansPro from uploads/fonts/
+            template_src = template_src.replace(
+                "%%FONT_PLACEHOLDER%%",
+                "\\setmainfont[\n"
+                "BoldFont=SourceSansPro-Semibold.otf,\n"
+                "ItalicFont=SourceSansPro-RegularIt.otf\n"
+                "]{SourceSansPro-Regular.otf}",
+            )
+        else:
+            template_src = template_src.replace(
+                "%%FONT_PLACEHOLDER%%", _font_fallback
+            )
+            logger.info("  fonts/ dir not found — using Helvetica fallback")
+    elif not fonts_dir.is_dir() and "\\setmainfont" in template_src:
+        # Default template or any template with inline \setmainfont
+        # Pattern 1: \setmainfont{...}[...]  (options after name)
         template_src = _re.sub(
             r"\\setmainfont\{[^}]*\}\[.*?\]",
-            lambda _m: "\\setmainfont{Latin Modern Roman}",
-            template_src,
-            flags=_re.DOTALL,
+            _font_fallback, template_src, flags=_re.DOTALL,
         )
-        logger.info("  fonts/ dir not found — falling back to Latin Modern Roman")
+        # Pattern 2: \setmainfont[...]{...}  (options before name)
+        template_src = _re.sub(
+            r"\\setmainfont\[.*?\]\{[^}]*\}",
+            _font_fallback, template_src, flags=_re.DOTALL,
+        )
+        # Pattern 3: \setmainfont{...}  (no options at all)
+        template_src = _re.sub(
+            r"\\setmainfont\{[^}]*\.otf\}",
+            _font_fallback, template_src,
+        )
+        logger.info("  fonts/ dir not found — falling back to Helvetica")
 
 
     # --- Escape LaTeX special chars in plain text ---
@@ -523,19 +553,29 @@ def node_compile_cover_letter_pdf(state: PipelineState) -> PipelineState:
     import config as _cfg
 
     reqs = state.get("requirements", {})
-    role = reqs.get("role", "the position")
-    company = reqs.get("company", "your company")
-    recipient = reqs.get("hiring_manager", "Hiring Manager")
+    role = reqs.get("role") or "the position"
+    company = reqs.get("company") or "your company"
+    recipient = reqs.get("hiring_manager") or "Hiring Manager"
+
+    # Strip protocol + trailing slash for display-friendly URL text
+    def _display_url(url: str | None) -> str:
+        """Strip protocol, trailing slash, and escape for LaTeX text mode."""
+        if not url:
+            return ""
+        display = _re.sub(r"^https?://", "", url).rstrip("/")
+        # Escape underscores for LaTeX text mode (inside \href display arg)
+        display = display.replace("_", r"\_")
+        return display
 
     subs = {
         "{{APPLICANT_NAME}}": _cfg.APPLICANT_NAME or "Applicant",
         "{{APPLICANT_EMAIL}}": _cfg.APPLICANT_EMAIL or "",
         "{{APPLICANT_PHONE}}": _cfg.APPLICANT_PHONE or "",
-        "{{TARGET_ROLE}}": _esc(role),
+        "{{TARGET_ROLE}}": _esc(f"{role} - {company}"),
         "{{LINKEDIN_URL}}": _cfg.APPLICANT_LINKEDIN or "",
-        "{{LINKEDIN_TEXT}}": "LinkedIn" if _cfg.APPLICANT_LINKEDIN else "",
+        "{{LINKEDIN_DISPLAY}}": _display_url(_cfg.APPLICANT_LINKEDIN),
         "{{PORTFOLIO_URL}}": _cfg.GITHUB_URL or "",
-        "{{PORTFOLIO_TEXT}}": "GitHub" if _cfg.GITHUB_URL else "",
+        "{{PORTFOLIO_DISPLAY}}": _display_url(_cfg.GITHUB_URL),
         "{{RECIPIENT}}": _esc(recipient),
         "{{BODY}}": _esc(cl_text),
     }
@@ -544,13 +584,31 @@ def node_compile_cover_letter_pdf(state: PipelineState) -> PipelineState:
     for placeholder, value in subs.items():
         latex_src = latex_src.replace(placeholder, value)
 
-    # --- Compile with xelatex ---
-    output_dir = project_root / "cv" / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # --- Handle conditional blocks: %%IF_<KEY>%% ... %%ENDIF_<KEY>%% ---
+    # When a value is empty, strip the entire block (markers + content).
+    # When a value is present, keep the content but remove the markers.
+    _conditionals = {
+        "PHONE": _cfg.APPLICANT_PHONE,
+        "LINKEDIN": _cfg.APPLICANT_LINKEDIN,
+        "PORTFOLIO": _cfg.GITHUB_URL,
+    }
+    for key, val in _conditionals.items():
+        open_tag = f"%%IF_{key}%%"
+        close_tag = f"%%ENDIF_{key}%%"
+        if val:
+            # Value present — keep content, strip markers
+            latex_src = latex_src.replace(open_tag, "")
+            latex_src = latex_src.replace(close_tag, "")
+        else:
+            # Value empty — remove entire block (markers + content between)
+            pattern = _re.escape(open_tag) + r".*?" + _re.escape(close_tag)
+            latex_src = _re.sub(pattern, "", latex_src, flags=_re.DOTALL)
 
-    safe_co = _re.sub(r"[^\w\-]", "_", company)[:30]
-    safe_ro = _re.sub(r"[^\w\-]", "_", role)[:30]
-    pdf_name = f"cover_letter_{safe_co}_{safe_ro}.pdf"
+
+    # --- Compile with xelatex ---
+    from config import get_output_dir
+    output_dir = get_output_dir(str(company), str(role))
+    pdf_name = "Cover Letter.pdf"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tex_file = Path(tmpdir) / "cover_letter.tex"
@@ -567,6 +625,7 @@ def node_compile_cover_letter_pdf(state: PipelineState) -> PipelineState:
                  "-halt-on-error", str(tex_file)],
                 cwd=tmpdir, capture_output=True, text=True, timeout=60,
             )
+            print(f"=== DEBUG: xelatex exit={proc.returncode}, pdf_exists={Path(tmpdir).joinpath(chr(99)+chr(111)+chr(118)+chr(101)+chr(114)+chr(95)+chr(108)+chr(101)+chr(116)+chr(116)+chr(101)+chr(114)+chr(46)+chr(112)+chr(100)+chr(102)).exists()}")
             compiled = Path(tmpdir) / "cover_letter.pdf"
             if compiled.exists():
                 final = output_dir / pdf_name
@@ -656,6 +715,11 @@ def node_approval_gate(state: PipelineState) -> PipelineState:
     if pdf_path and Path(pdf_path).exists():
         send_document(pdf_path, caption=f"📄 Tailored resume for {role} at {company}")
 
+    # Send the cover letter PDF (if generated)
+    cl_pdf_path = state.get("cover_letter_pdf_path")
+    if cl_pdf_path and Path(cl_pdf_path).exists():
+        send_document(cl_pdf_path, caption=f"📄 Cover letter for {role} at {company}")
+
     # Build review message
     parts = [
         f"<b>Review Application</b>\n",
@@ -717,10 +781,12 @@ def node_gmail_draft(state: PipelineState) -> PipelineState:
         # form or manual — still create a draft (recipient blank for manual)
         recipient = ""
 
-    # Build attachments list
+    # Build attachments list (resume + cover letter if available)
     attachments = []
     if state.get("resume_pdf_path"):
         attachments.append(state["resume_pdf_path"])
+    if state.get("cover_letter_pdf_path") and Path(state["cover_letter_pdf_path"]).exists():
+        attachments.append(state["cover_letter_pdf_path"])
 
     try:
         draft_url, draft_id = create_draft(
@@ -822,12 +888,6 @@ def node_gate2(state: PipelineState) -> PipelineState:
     if draft_url:
         parts.append(f'\n<a href="{draft_url}">📝 View Gmail Draft</a>')
 
-    if state.get("cover_letter_pdf_path") and Path(state["cover_letter_pdf_path"]).exists():
-        send_document(
-            state["cover_letter_pdf_path"],
-            caption=f"📄 Cover letter for {role} at {company}",
-        )
-
     if route == "form":
         form_result = state.get("form_result", {})
         form_status = form_result.get("status", "unknown")
@@ -886,6 +946,8 @@ def node_execute_send(state: PipelineState) -> PipelineState:
         attachments = []
         if state.get("resume_pdf_path"):
             attachments.append(state["resume_pdf_path"])
+        if state.get("cover_letter_pdf_path") and Path(state["cover_letter_pdf_path"]).exists():
+            attachments.append(state["cover_letter_pdf_path"])
 
         try:
             from apply.gmail_sender import send_email

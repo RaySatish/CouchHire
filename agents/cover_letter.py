@@ -11,7 +11,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# ── Tone keywords ────────────────────────────────────────────────
+# ── Tone keywords ────────────────────────────────────────────────────────
 _QUANT_KEYWORDS = {"quant", "trading", "finance"}
 _ML_KEYWORDS = {"ml", "machine learning", "ai", "llm"}
 
@@ -45,9 +45,10 @@ def _tone_instruction(tone: str) -> str:
             "contributions where relevant."
         )
     return (
-        "Tone: professional, project-led, and achievement-focused. "
-        "Lead with concrete outcomes and real-world impact. Keep the "
-        "language confident but not boastful."
+        "Tone: confident and direct, but human. Not a list of achievements — "
+        "a person explaining why they are the right fit. Lead with fit, "
+        "not credentials. Sound like someone who has thought about this role "
+        "specifically, not someone mass-applying."
     )
 
 
@@ -83,25 +84,30 @@ Paragraph 1 — Why {company} and this {role} specifically.
 Be specific about what draws the candidate to this company and role.
 Do NOT use generic phrases like "I am excited to apply" or "I am writing to express my interest".
 Reference something concrete about the company or role requirements.
+This paragraph is about THEM, not the candidate.
 
-Paragraph 2 — What the candidate brings.
-Lead with the strongest project or experience from the resume summary (the "Led with" item).
-EXTEND its narrative — explain the impact, the story behind it, what it demonstrates about the candidate.
-Connect it to the role's required skills: {skills_str}.
-Do NOT re-list the tech stack or bullet points from the resume.
-The resume covers what was built. The cover letter covers why it mattered and what it demonstrates about the candidate.
+Paragraph 2 — Why the candidate fits.
+This is NOT a project description. The resume already lists what was built.
+This paragraph answers: "What does this person's background tell you about how they think and work?"
+Take the strongest project or experience from the resume summary and explain:
+  - What problem it was actually solving (not the tech used)
+  - What it demonstrates about how the candidate approaches hard problems
+  - Why that maps directly to what {company} needs for this {role}
+One concrete example, extended into a point about fit. Not a list. Not a stack.
+Do NOT re-list bullets, tech stacks, or percentages from the resume.
 Write in clear, concise sentences. Maximum 2 clauses per sentence.
 Do not chain sentences with 'and'. Each sentence should stand alone.
 
 Paragraph 3 — Close.
-Paragraph 3 must be 2-3 short sentences. End with a clean call to action as its own sentence.
-Express availability and enthusiasm naturally.
+2-3 short sentences. Express genuine interest without desperation.
+End with a clean, direct call to action as its own sentence.
 
 RULES:
 - Output ONLY the 3 paragraphs as plain text
 - No markdown, no headers, no "Dear Hiring Manager", no "Sincerely"
-- Do not repeat technical stack details already listed in the resume
-- The resume covers what was built. The cover letter covers why it mattered and what it demonstrates about the candidate
+- CRITICAL: Only reference projects, skills, and experiences explicitly listed in the RESUME SUMMARY above. Do not add, invent, or imply anything else.
+- The resume covers what was built. The cover letter covers what it says about the candidate.
+- Sell the person, not the project list. Show fit, not just ability.
 - Same voice as the resume — written by the same person, for the same application
 - Keep total length between 150 and 300 words
 - Separate paragraphs with a single blank line"""
@@ -135,16 +141,17 @@ def generate(
     prompt = _build_prompt(requirements, cv_sections, resume_content, tone)
 
     system_prompt = (
-        "You are a professional cover letter writer. You produce concise, "
-        "compelling cover letters that complement — never duplicate — the "
-        "candidate's resume. Output plain text only. No markdown, no headers, "
-        "no salutations, no sign-offs unless they fit naturally. "
-        "CRITICAL CONSTRAINT: The cover letter must ONLY reference projects, "
-        "skills, experiences, and achievements that appear in the provided "
-        "resume content. It must not mention anything that is not on the "
-        "resume. The resume and cover letter are a package — they must be "
-        "consistent. If the resume summary is provided, treat it as the "
-        "definitive list of what can be referenced."
+        "You are a professional cover letter writer. "
+        "Your job is to sell the candidate as a person who fits this role — "
+        "not to describe their projects. The resume already lists what they built. "
+        "Your letter explains what kind of thinker and problem-solver they are, "
+        "and why that maps to what this company needs. "
+        "ABSOLUTE RULE: You may ONLY reference projects, skills, experiences, "
+        "and achievements that are explicitly listed in the RESUME SUMMARY "
+        "provided in the prompt. Do NOT invent, infer, or add any skill, "
+        "technology, project detail, or achievement that is not word-for-word "
+        "present in that summary. Treat the resume summary as the only source of truth. "
+        "Output plain text only. No markdown, no headers, no salutations, no sign-offs."
     )
 
     try:

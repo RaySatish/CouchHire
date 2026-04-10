@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 _CV_DIR = Path(__file__).resolve().parent.parent / "cv"
 _UPLOADS_DIR = _CV_DIR / "uploads"
 _DEFAULTS_DIR = _CV_DIR / "defaults"
-_OUTPUT_DIR = _CV_DIR / "output"
+# _OUTPUT_DIR removed — output paths now use config.get_output_dir()
 
 # ── Regex ──────────────────────────────────────────────────────────────
 # Matches %%INJECT:SECTION%% ... %%END:SECTION%% blocks in the template
@@ -840,7 +840,6 @@ def _assemble_skills_section(
     )
     return result
 
-
 def _inject_into_template(
     template: str,
     assembled: dict[str, str],
@@ -1427,58 +1426,91 @@ def _generate_resume_content_summary(
     selection: dict,
     requirements: dict,
     instructions: str,
+    raw_sections: dict[str, str] | None = None,
 ) -> str:
-    """Generate a structured plain-text summary of the tailored resume.
+    """Build a grounded plain-text summary of the tailored resume.
 
-    This is a small LLM call that reads the selection JSON (what was
-    included/excluded and in what order) and produces a summary for
-    cover_letter.py to consume. It does NOT generate any LaTeX.
+    Constructed deterministically from the actual raw CV text (raw_sections)
+    so that cover_letter.py and email_drafter.py can only reference content
+    that genuinely exists in the resume. No LLM call — zero hallucination risk.
     """
-    sections = selection.get("sections_to_include", {})
+    role = requirements.get("role", "the role")
+    company = requirements.get("company", "the company")
+    sections_included = selection.get("sections_to_include", {})
     project_order = selection.get("project_order", [])
     experience_note = selection.get("experience_note", "")
+    skills_selected = selection.get("skills_to_include", {})
 
-    prompt = f"""You are summarising a tailored resume for a cover letter writer.
+    lines: list[str] = [
+        f"Resume tailored for: {role} at {company}",
+        "",
+    ]
 
-ROLE: {requirements.get('role', 'Unknown')}
-COMPANY: {requirements.get('company', 'Unknown')}
+    # ── Projects ──────────────────────────────────────────────────────────────
+    raw_projects_text = (raw_sections or {}).get("Projects", "")
+    if project_order and raw_projects_text:
+        lines.append("PROJECTS INCLUDED (in priority order):")
+        for proj_name in project_order:
+            # Extract the block for this project from the raw LaTeX
+            # Look for the project name and grab the next ~10 lines of content
+            proj_pattern = re.compile(
+                r"(?s)" + re.escape(proj_name) + r".{0,2000}?(?=\\resumeProjectHeading|\\resumeSubheading|\\end\{itemize\}|$)"
+            )
+            match = proj_pattern.search(raw_projects_text)
+            if match:
+                # Strip LaTeX commands, keep readable text
+                block = match.group(0)
+                # Remove LaTeX commands but keep text content
+                block = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", block)
+                block = re.sub(r"\\[a-zA-Z]+", "", block)
+                block = re.sub(r"[{}]", "", block)
+                block = re.sub(r"\s+", " ", block).strip()
+                # Truncate to first 200 chars for brevity
+                if len(block) > 200:
+                    block = block[:200].rsplit(" ", 1)[0] + "..."
+                lines.append(f"  - {proj_name}: {block}")
+            else:
+                lines.append(f"  - {proj_name}")
+        lines.append("")
 
-WHAT WAS INCLUDED IN THE RESUME:
-- Sections included: {', '.join(k for k, v in sections.items() if v)}
-- Projects (in order): {', '.join(project_order) if project_order else 'All'}
-- Experience selection note: {experience_note or 'None'}
+    # ── Experience ─────────────────────────────────────────────────────────────
+    raw_exp_text = (raw_sections or {}).get("Experience", "")
+    if sections_included.get("Experience") and raw_exp_text:
+        lines.append("EXPERIENCE INCLUDED:")
+        # Strip LaTeX, extract readable lines
+        exp_clean = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", raw_exp_text)
+        exp_clean = re.sub(r"\\[a-zA-Z]+", "", exp_clean)
+        exp_clean = re.sub(r"[{}]", "", exp_clean)
+        # Grab non-empty lines, skip very short ones
+        exp_lines = [l.strip() for l in exp_clean.split("\n") if len(l.strip()) > 20]
+        for l in exp_lines[:6]:  # First 6 meaningful lines
+            lines.append(f"  {l}")
+        if experience_note:
+            lines.append(f"  Note: {experience_note}")
+        lines.append("")
 
-MANDATORY TAILORING RULES THAT WERE APPLIED:
-{instructions}
+    # ── Skills ─────────────────────────────────────────────────────────────────
+    raw_skills_text = (raw_sections or {}).get("Skills", "")
+    if raw_skills_text:
+        lines.append("SKILLS ON THE RESUME:")
+        skills_clean = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", raw_skills_text)
+        skills_clean = re.sub(r"\\[a-zA-Z]+", "", skills_clean)
+        skills_clean = re.sub(r"[{}]", "", skills_clean)
+        skills_clean = re.sub(r"\s+", " ", skills_clean).strip()
+        if len(skills_clean) > 400:
+            skills_clean = skills_clean[:400].rsplit(" ", 1)[0] + "..."
+        lines.append(f"  {skills_clean}")
+        lines.append("")
 
-Write a structured bullet-point summary (5-8 bullets) covering:
-1. Which projects were selected and why they're relevant
-2. What skills/experience were highlighted
-3. What narrative angle or positioning was chosen
-4. What was deliberately omitted and why
-5. What the cover letter should complement (not repeat)
-
-Be specific — reference actual project names and skills. Keep each bullet to 1-2 sentences.
-Output ONLY the bullet points, no preamble."""
-
-    system_prompt = (
-        "You are a resume analysis assistant. Summarise what a tailored resume "
-        "emphasises so a cover letter can complement it. Be concise and specific."
+    lines.append(
+        "IMPORTANT: The cover letter and email MUST ONLY reference the projects, "
+        "skills, and experiences listed above. Do not add, invent, or imply anything "
+        "not explicitly present in this summary."
     )
 
-    try:
-        summary = complete(prompt, system_prompt=system_prompt)
-        logger.info("Resume content summary generated (%d chars)", len(summary))
-        return summary
-    except Exception as exc:
-        logger.error("Failed to generate resume content summary: %s", exc)
-        # Fallback: build a basic summary from the selection data
-        lines = [
-            f"- Resume tailored for {requirements.get('role', 'the role')} at {requirements.get('company', 'the company')}",
-            f"- Projects included (in order): {', '.join(project_order) if project_order else 'all from master CV'}",
-            f"- Experience note: {experience_note or 'all experience included'}",
-        ]
-        return "\n".join(lines)
+    summary = "\n".join(lines)
+    logger.info("Resume content summary built deterministically (%d chars)", len(summary))
+    return summary
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1639,14 +1671,13 @@ def tailor(cv_sections: list[str], requirements: dict) -> tuple[str, str]:
             jd_text=requirements.get("_jd_text", ""),
         )
 
-    # ── Step 6: Write .tex, compile PDF, enforce page limit ──
-    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    from config import get_output_dir
+    company_raw = requirements.get("company") or "unknown_company"
+    role_raw = requirements.get("role") or "unknown_role"
 
-    company = re.sub(r"[^\w-]", "_", requirements.get("company") or "company")
-    role = re.sub(r"[^\w-]", "_", requirements.get("role") or "role")
-    timestamp = int(time.time())
-    tex_name = f"resume_{company}_{role}_{timestamp}.tex"
-    tex_path = _OUTPUT_DIR / tex_name
+    # ── Step 6: Write .tex, compile PDF, enforce page limit ──
+    out_dir = get_output_dir(company_raw, role_raw)
+    tex_path = out_dir / "Resume.tex"
 
     pdf_path = _enforce_page_limit(
         template=template,
@@ -1664,7 +1695,7 @@ def tailor(cv_sections: list[str], requirements: dict) -> tuple[str, str]:
 
     # ── Step 7: Generate resume_content summary ──
     resume_content = _generate_resume_content_summary(
-        selection, requirements, instructions,
+        selection, requirements, instructions, raw_sections=raw_sections,
     )
 
     elapsed = time.time() - start_time

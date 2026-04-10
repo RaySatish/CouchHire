@@ -5,6 +5,7 @@ is missing, a RuntimeError is raised listing every missing key.
 """
 
 import logging
+import re
 import os
 from pathlib import Path
 
@@ -233,7 +234,18 @@ PROJECT_ROOT: Path = _PROJECT_ROOT
 CV_DIR: Path = _PROJECT_ROOT / "cv"
 CHROMA_STORE_DIR: Path = CV_DIR / "chroma_store"
 MASTER_CV_PATH: Path = CV_DIR / "master_cv.tex"
-OUTPUT_DIR: Path = _PROJECT_ROOT / "output"
+# Base directory for all generated output (resumes, cover letters).
+# Reads from OUTPUT_BASE_DIR env var; falls back to cv/output/.
+OUTPUT_BASE_DIR: Path = Path(_env("OUTPUT_BASE_DIR")) if _env("OUTPUT_BASE_DIR") else _PROJECT_ROOT / "cv" / "output"
+
+
+def get_output_dir(company: str, role: str) -> Path:
+    """Build output path: OUTPUT_BASE_DIR / <company> / <role> /, creating dirs as needed."""
+    safe_company = re.sub(r"[^\w\-]+", "_", company.strip())[:50].strip("_")
+    safe_role = re.sub(r"[^\w\-]+", "_", role.strip())[:50].strip("_")
+    out = OUTPUT_BASE_DIR / (safe_company or "unknown_company") / (safe_role or "unknown_role")
+    out.mkdir(parents=True, exist_ok=True)
+    return out
 
 # Directory where fine-tuned models are saved (gitignored via nlp/models/).
 FINETUNED_MODEL_DIR: Path = _PROJECT_ROOT / "nlp" / "models" / "match_scorer_finetuned"
