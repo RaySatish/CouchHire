@@ -1,3 +1,4 @@
+import re
 """LiteLLM wrapper — single entry point for all LLM calls in CouchHire.
 
 Every agent calls `complete()` from this module. Never import or call
@@ -39,6 +40,21 @@ def _is_ollama_running() -> bool:
 def _friendly_provider_name(model_string: str) -> str:
     """Extract a human-readable provider name from a litellm model string."""
     return model_string.split("/")[0] if "/" in model_string else model_string
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> blocks from LLM responses.
+
+    Some models (e.g. qwen3-32b) emit internal reasoning wrapped in
+    <think> tags.  These must never leak into user-facing output.
+    Handles both closed (<think>...</think>) and unclosed (<think>...)
+    tags.
+    """
+    # Remove closed <think>...</think> blocks (DOTALL for multiline)
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Remove unclosed <think> block (everything from <think> to end)
+    cleaned = re.sub(r"<think>.*", "", cleaned, flags=re.DOTALL)
+    return cleaned.strip()
 
 
 def complete(prompt: str, system_prompt: str | None = None, max_tokens: int | None = None) -> str:
@@ -133,6 +149,7 @@ def complete(prompt: str, system_prompt: str | None = None, max_tokens: int | No
                     LLM_PROVIDER,
                 )
 
+            text = _strip_think_tags(text)
             return text
 
         except RateLimitError as exc:

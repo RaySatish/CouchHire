@@ -52,7 +52,7 @@ CouchHire is a fully agentic job application pipeline. Paste a job description, 
 | NLP | spaCy + sentence-transformers | NER for skill extraction, cosine similarity for match scoring |
 | Database | Supabase (PostgreSQL) | Applications table, outcome labels, retraining data |
 | Job search | JobSpy (python-jobspy) | Multi-board job scraping: Indeed, LinkedIn, Glassdoor, Google, ZipRecruiter |
-| Email drafts | Gmail MCP | Creates Gmail draft with resume PDF attachment (never auto-sends) |
+| Email drafts | Gmail MCP ([google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp)) | Creates Gmail draft via `draft_gmail_message` tool with resume PDF attachment (never auto-sends) |
 | Browser automation | Playwright | Semi-autonomous ATS form filling via CDP (`connect_over_cdp()`), LLM-assisted field mapping, human-in-the-loop interrupt system via Telegram |
 | Notifications + review | Telegram bot (python-telegram-bot) | Approve / edit / label outcomes from your phone |
 | Dashboard | Streamlit | Application tracker, analytics, retrain controls, settings |
@@ -73,10 +73,10 @@ couchhire/
 │   ├── resume_assembler.py   # LaTeX block extraction + itemize wrapper utilities (internal helper)
 │   ├── cv_content_helpers.py # Section → named block extraction + content inventory builder (internal helper)
 │   ├── cover_letter.py       # Cover letter generation (conditional, receives resume_content) → string
-│   ├── email_drafter.py      # Email draft generation → subject + body strings
+│   ├── email_drafter.py      # Email draft generation (receives resume_content for project-specific context) → subject + body strings
 │   └── apply_router.py       # Detects email / form / manual route → route string
 ├── apply/            # Gmail draft creator (MCP client), Playwright browser agent, session handoff
-│   ├── gmail_sender.py       # MCP client: create_draft() + send_draft() — draft-only by default
+│   ├── gmail_sender.py       # MCP client: create_draft() + send_draft() via draft_gmail_message / send_gmail_message tools (google_workspace_mcp)
 │   ├── browser_agent.py      # Semi-autonomous ATS form filler (LLM field mapping + blocker detection + Telegram interrupts)
 │   └── session_handoff.py    # CDP session manager (launches Chromium with --remote-debugging-port for Playwright + manual takeover)
 ├── bot/              # Telegram bot
@@ -170,9 +170,11 @@ This section is intentionally precise so that each module has a clear contract. 
 - **LLM call:** yes — uses `llm/client.py`
 
 ### `agents/email_drafter.py`
-- **Input:** `requirements`, `cover_letter_text` (may be None), `resume_pdf_path`
+- **Input:** `requirements`, `resume_content` (structured summary of tailored resume — what projects/skills were emphasised), `cover_letter_text` (may be None), `resume_pdf_path`
 - **Output:** `email_subject` (str), `email_body` (str, ≤200 words)
-- **Always includes:** GitHub link (read from config)
+- **Generates human-quality emails** that reference specific projects from the tailored resume by name, mention education briefly, and include a proper signature (name, email, phone)
+- **Tone:** casual-professional — modeled after real application emails, not corporate-speak. Uses a real example email in the prompt as a voice/tone reference
+- **Always includes:** GitHub link woven naturally into the body (not as a standalone line)
 - **LLM call:** yes — uses `llm/client.py`
 
 ### `agents/apply_router.py`
@@ -181,9 +183,9 @@ This section is intentionally precise so that each module has a clear contract. 
 - **No LLM call** — deterministic routing logic only
 
 ### `apply/gmail_sender.py`
-- **Input:** `email_subject`, `email_body`, `resume_pdf_path`, `apply_target`, optional `cover_letter_pdf_path`
-- **`create_draft()`:** creates Gmail draft via MCP server with resume PDF (and cover letter PDF if present) attached — returns `(draft_url, draft_id)`
-- **`send_draft()`:** sends an existing draft by `draft_id` via MCP — only called after Gate 2 approval
+- **Input:** `email_subject`, `email_body`, `resume_pdf_path`, `apply_target`, optional `cover_letter_pdf_path`, `user_google_email` (from `APPLICANT_EMAIL` in config)
+- **`create_draft()`:** calls `draft_gmail_message` tool on the Gmail MCP server (`google_workspace_mcp`) with resume PDF (and cover letter PDF if present) attached — returns `(draft_url, draft_id)`
+- **`send_email()`:** calls `send_gmail_message` tool on the MCP server — returns the message ID (str) for constructing the sent URL. Only called after Gate 2 approval
 - **Draft-only by default** — the pipeline creates a draft, user reviews in Gmail, Gate 2 approval triggers send
 - **No LLM call**
 
@@ -228,7 +230,7 @@ This section is intentionally precise so that each module has a clear contract. 
 - Single function: `complete(prompt, system_prompt=None, max_tokens=None) → str`
 - Reads `LLM_PROVIDER` from config, routes to correct LiteLLM model via 9-model fallback chain across 5 providers
 - `max_tokens` parameter for calls needing long structured output (e.g. JSON content selection)
-- Handles `<think>...</think>` blocks from reasoning models (Qwen3, DeepSeek-R1)
+- **Strips `<think>...</think>` blocks globally** from all LLM responses — handles reasoning models (Qwen3, DeepSeek-R1) that leak internal thinking tokens. No agent needs to handle this individually
 - All agents call this — never call LiteLLM directly from an agent
 
 ### `config.py`
@@ -262,7 +264,7 @@ match_score >= MATCH_THRESHOLD?
 Generator agents (sequential via LangGraph)
   ├─ resume_tailor.py   → LLM content selection → tailored .tex → pdflatex → PDF path
   ├─ cover_letter.py    → only if cover_letter_required == True (receives resume_content)
-  └─ email_drafter.py   → subject line + body (≤200 words)
+  └─ email_drafter.py   → subject line + human-quality body referencing resume projects (receives resume_content)
         │
         ▼
 telegram_bot.py — notification card
@@ -392,15 +394,43 @@ You need at least one LLM key. All others are required for full functionality.
 
 ---
 
-### Gmail MCP
-1. Go to https://console.cloud.google.com
+### Gmail MCP (google_workspace_mcp)
+
+CouchHire uses [`google_workspace_mcp`](https://github.com/taylorwilsdon/google_workspace_mcp) as its Gmail MCP server. CouchHire is an MCP client — it connects to this server over Streamable HTTP and calls `draft_gmail_message` / `send_gmail_message` tools.
+
+**Google Cloud setup:**
+1. Go to [Google Cloud Console](https://console.cloud.google.com)
 2. Create a new project (or use an existing one)
-3. Enable the **Gmail API** for the project
-4. OAuth consent screen → configure as External
-5. Credentials → Create OAuth 2.0 Client ID (Desktop app)
-6. Download the credentials JSON
-7. Run the Gmail MCP auth flow (see the Gmail MCP docs) to exchange for a token
-8. The resulting token → `GMAIL_MCP_TOKEN`
+3. Enable the **Gmail API** (APIs & Services → Library → Gmail API → Enable)
+4. Configure the **OAuth consent screen** (APIs & Services → OAuth consent screen):
+   - Choose External
+   - Add scopes: `gmail.compose`, `gmail.modify`
+   - Add your Gmail address as a **test user** (required while app is in Testing status)
+5. Create **OAuth credentials** (APIs & Services → Credentials → Create → OAuth client ID):
+   - Application type: **Desktop application**
+   - Copy the **Client ID** and **Client Secret**
+
+**MCP server setup:**
+1. Install `uv` (system-level, not inside your project venv):
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+2. Create a launcher script (e.g. `~/start-gmail-mcp.sh`):
+   ```bash
+   #!/bin/bash
+   export GOOGLE_OAUTH_CLIENT_ID="your-client-id.apps.googleusercontent.com"
+   export GOOGLE_OAUTH_CLIENT_SECRET="your-client-secret"
+   export OAUTHLIB_INSECURE_TRANSPORT=1
+   export MCP_SINGLE_USER_MODE=true
+   export USER_GOOGLE_EMAIL="your-email@gmail.com"
+
+   uvx workspace-mcp --tools gmail --transport streamable-http
+   ```
+3. `chmod +x ~/start-gmail-mcp.sh` and run it — server starts at `http://localhost:8000/mcp`
+4. On first use, it opens your browser for Google OAuth — sign in and authorize
+5. Set `GMAIL_MCP_URL=http://localhost:8000/mcp` in your `.env`
+
+**Important:** The MCP server runs via `uvx` (system-level) — completely separate from your project venv. Start it in one terminal before running the pipeline.
 
 ---
 
@@ -717,7 +747,7 @@ Available at http://localhost:8501 once running.
 
 - [x] Core pipeline (JD parser → resume tailor → email drafter)
 - [x] Telegram bot (notifications + approval buttons + /outcome command + /search + /apply + gate handlers + auto-retrain hook)
-- [x] Gmail MCP integration (create_draft + send_draft via MCP client)
+- [x] Gmail MCP integration (draft_gmail_message + send_gmail_message via google_workspace_mcp over Streamable HTTP)
 - [x] Semi-autonomous browser agent (LLM-assisted ATS form filling + human-in-the-loop)
 - [x] CDP session management for browser takeover
 - [x] Supabase logging
@@ -727,6 +757,9 @@ Available at http://localhost:8501 once running.
 - [x] Cover letter PDF compilation (XeLaTeX template with placeholder markers)
 - [x] LangGraph pipeline orchestrator (19 nodes, 6 conditional edges, 2 Telegram approval gates, CLI with --jd/--url/--file/--search modes)
 - [x] Integration tests (55/55 passing)
+- [x] Pipeline hardening (error routing on agent failure, `<think>` tag stripping in LLM client)
+- [x] Human-quality application emails (email drafter receives resume_content, references specific projects)
+- [x] Post-send confirmation (Telegram shows 'Application Sent' with sent message URL after Gate 2)
 - [ ] Streamlit dashboard (Step 26 — next)
 - [ ] Full pytest suite (Step 27)
 - [ ] Docker support (Step 28)

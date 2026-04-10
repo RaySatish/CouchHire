@@ -4,7 +4,7 @@ Two modes of operation:
 
 Mode 1 — Sync notification senders (called by pipeline, browser_agent, etc.):
     send_notification(), send_photo(), send_job_card(), send_draft_ready(),
-    send_form_started(), send_manual_notice()
+    send_form_started(), send_manual_notice(), send_sent_confirmation()
 
 Mode 2 — Long-running async bot (for /outcome, /search commands + interrupt replies):
     start_bot()  — blocking polling loop
@@ -27,6 +27,14 @@ This is one of the two allowed async exceptions per CLAUDE.md.
 # one copy exists.
 # ---------------------------------------------------------------------------
 import sys as _sys
+from pathlib import Path as _Path
+
+# Ensure project root is on sys.path so `from config import ...` works
+# when this file is run directly as `python bot/telegram_bot.py`.
+_project_root = str(_Path(__file__).resolve().parent.parent)
+if _project_root not in _sys.path:
+    _sys.path.insert(0, _project_root)
+
 if __name__ == "__main__" and "bot.telegram_bot" not in _sys.modules:
     _sys.modules["bot.telegram_bot"] = _sys.modules[__name__]
 
@@ -276,6 +284,23 @@ def send_draft_ready(company: str, role: str, draft_url: str) -> None:
     send_notification(text, reply_markup=markup)
 
 
+def send_sent_confirmation(company: str, role: str, sent_url: str) -> None:
+    """Send a confirmation that the application email was sent successfully."""
+    safe_company = _escape_html(company)
+    safe_role = _escape_html(role)
+
+    text = (
+        f"✉️ <b>Application Sent!</b>\n"
+        f"\n"
+        f"Your application for <b>{safe_company} — {safe_role}</b> "
+        f"was sent successfully."
+    )
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📨 View Sent Email", url=sent_url)]
+    ])
+    send_notification(text, reply_markup=markup)
+
+
 def send_form_started(company: str, role: str) -> None:
     """Send a notification when the browser agent starts form filling."""
     safe_company = _escape_html(company)
@@ -445,6 +470,8 @@ def request_interrupt(
             "type": interrupt_type,
         }
 
+    print(f"[DEBUG-INTERRUPT] _pending_interrupt SET for type={interrupt_type}, id={id(_pending_interrupt)}, module={__name__}")
+
     if buttons:
         keyboard_buttons = [
             [InlineKeyboardButton(text=btn["text"], callback_data=btn["callback_data"])]
@@ -456,7 +483,9 @@ def request_interrupt(
         send_notification(message)
 
     event = _pending_interrupt["event"]
+    print(f"[DEBUG-INTERRUPT] Waiting on event (timeout={timeout}s)...")
     event.wait(timeout=timeout)
+    print(f"[DEBUG-INTERRUPT] event.wait() returned. is_set={event.is_set()}")
 
     with _interrupt_lock:
         if not event.is_set():
@@ -868,7 +897,7 @@ async def _handle_callback(update: Update, context) -> None:
                 "gate1_approve": "✅ Approved",
                 "gate1_regenerate": "✏️ Regenerate",
                 "gate1_cancel": "❌ Cancelled",
-                "gate2_send": "📤 Sending",
+                "gate2_approve": "📤 Sending",
                 "gate2_cancel": "❌ Cancelled",
             }.get(data, data)
 
@@ -885,6 +914,9 @@ async def _handle_callback(update: Update, context) -> None:
         return
 
     # --- Handle yes/no/done callbacks (interrupt system) ---
+    print(f"[DEBUG-CALLBACK] Generic handler: data={data!r}, _pending_interrupt is None? {_pending_interrupt is None}, module={__name__}")
+    if _pending_interrupt is not None:
+        print(f"[DEBUG-CALLBACK] _pending_interrupt type={_pending_interrupt.get('type')}, id={id(_pending_interrupt)}")
     handled = False
     with _interrupt_lock:
         if _pending_interrupt is not None:

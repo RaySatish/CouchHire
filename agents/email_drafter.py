@@ -1,7 +1,8 @@
 """Draft the application email — subject line and body.
 
 Subject construction is deterministic (no LLM call). Body is generated via
-llm/client.py, constrained to 100–150 words, plain text, professional tone.
+llm/client.py, grounded in the tailored resume content so it references
+specific projects and skills rather than being generic.
 """
 
 from __future__ import annotations
@@ -34,109 +35,164 @@ def _build_subject(requirements: dict) -> str:
 def _build_body_prompt(
     requirements: dict,
     cover_letter_text: str,
-    resume_pdf_path: str,
+    resume_content: str,
 ) -> str:
     """Build the LLM prompt for email body generation."""
-    from config import GITHUB_URL, APPLICANT_NAME
+    from config import GITHUB_URL, APPLICANT_NAME, APPLICANT_EMAIL, APPLICANT_PHONE
 
-    company = requirements.get("company", "the company")
-    role = requirements.get("role", "the role")
+    company = requirements.get("company") or "the company"
+    role = requirements.get("role") or "the role"
     skills = requirements.get("skills", [])
     email_instructions: str | None = requirements.get("email_instructions")
 
     skills_str = ", ".join(skills) if skills else "not specified"
     has_cover_letter = bool(cover_letter_text and cover_letter_text.strip())
 
-    # Base context
+    # Build signature
+    sig_parts = [APPLICANT_NAME]
+    if APPLICANT_EMAIL:
+        sig_parts.append(APPLICANT_EMAIL)
+    if APPLICANT_PHONE:
+        sig_parts.append(APPLICANT_PHONE)
+    signature = " | ".join(sig_parts)
+
+    # ── Example email for tone and structure ──
+    example = (
+        "Here is an EXAMPLE of the exact tone and structure I want "
+        "(do NOT copy this content — use the candidate's actual resume context below):\n\n"
+        "---\n"
+        "Hi,\n\n"
+        "I'm applying for the AI Research Intern role at Cloud First Technologies.\n\n"
+        "I'm a final-year M.Sc. student in Computational Statistics and Data Analytics "
+        "at VIT Vellore (CGPA: 9.23). My GitHub (github.com/RaySatish) has the best "
+        "summary of what I've built — highlights include a Maritime Situational Awareness "
+        "system using OCR + RAG pipelines, a NIFTY50 portfolio optimizer combining LSTM "
+        "forecasting with FinBERT sentiment analysis, and a TinyML wake word detection "
+        "model deployed on embedded hardware with ~70% size reduction through quantization.\n\n"
+        "I have strong foundations in deep learning, LLMs, RAG, NLP, and Python, and I've "
+        "done independent research at IIIT Allahabad. I'm comfortable experimenting with "
+        "models and working in an open-ended research environment.\n\n"
+        "Looking forward to your reply. Resume attached.\n\n"
+        f"{signature}\n"
+        "---"
+    )
+
+    # ── Main prompt ──
     lines: list[str] = [
         f"Write an application email body for the role of {role} at {company}.",
-        f"Candidate name: {APPLICANT_NAME}.",
-        f"Key skills: {skills_str}.",
-        f"A tailored resume PDF is attached to this email.",
+        "",
+        example,
+        "",
+        "NOW write the email using THIS candidate's actual context:",
+        "",
+        f"Candidate name: {APPLICANT_NAME}",
+        f"Target role: {role} at {company}",
+        f"Key skills from JD: {skills_str}",
+        "",
+        "RESUME CONTEXT (what's in the tailored resume being attached — "
+        "reference these specific projects and skills, don't make things up):",
+        resume_content if resume_content else "(no resume context available)",
+        "",
     ]
 
-    # Cover letter branch
     if has_cover_letter:
         lines.append(
-            "A cover letter is also attached. Structure the email as follows:\n"
-            "- Sentence 1: Introduce the candidate by name and express interest in the specific role at this company.\n"
-            "- Sentence 2: Briefly highlight the candidate's strongest relevant skill and how it fits the role.\n"
-            "- Sentence 3: Mention what specifically draws the candidate to this company.\n"
-            "- Sentence 4: Note that a cover letter and tailored resume are attached for further detail.\n"
-            "Write each sentence with enough substance to be meaningful — avoid terse, clipped phrasing."
+            "A cover letter is also attached, so keep the email brief. "
+            "Don't repeat what the cover letter says — just introduce yourself, "
+            "mention 1-2 highlights from the resume, and note that the cover letter "
+            "and resume are attached."
         )
     else:
         lines.append(
-            "No cover letter is attached, so the email body must carry more weight. "
-            "Structure the email as follows:\n"
-            f"- Sentence 1: Introduce the candidate by name and state interest in the {role} role at {company}.\n"
-            f"- Sentence 2: Describe the candidate's strongest skill from ({skills_str}) and how it directly applies to this role. Be specific.\n"
-            f"- Sentence 3: Describe a second relevant skill from ({skills_str}) and its practical value for the role.\n"
-            "- Sentence 4: Mention what draws the candidate to this company specifically.\n"
-            "- Sentence 5: Note the attached resume and invite further discussion.\n"
-            "Write each sentence with enough detail to be substantive — avoid short, generic phrasing."
+            "No cover letter is attached, so the email carries the weight. "
+            "Structure it like the example above:\n"
+            "- Open with 'Hi,' then a line saying you're applying for the specific role.\n"
+            "- A paragraph about your background — mention your education briefly, "
+            "then reference your GitHub and describe 2-3 specific projects from the "
+            "RESUME CONTEXT above. Be brief about each — one line per project, "
+            "mentioning the tech used and what it does. Use dashes or commas to chain them, "
+            "not bullet points.\n"
+            "- A short paragraph about your core strengths relevant to this role "
+            "and why you're a good fit.\n"
+            "- Close with a simple line like 'Looking forward to your reply. Resume attached.'"
         )
 
     # Honour JD-specified email instructions
     if email_instructions:
         lines.append(
-            f"IMPORTANT — the job description requires: {email_instructions}. "
-            "You MUST address this explicitly in the email body as an additional sentence."
+            f"\nIMPORTANT — the job description requires: {email_instructions}. "
+            "You MUST address this explicitly in the email body."
         )
 
-    # Closing and format rules
+    # Signature and format rules
     lines.append(
-        f'The email body MUST end with exactly this line on its own: "GitHub: {GITHUB_URL}"'
-    )
-    lines.append(
-        "RULES:\n"
-        "- Output ONLY the email body text, nothing else\n"
-        "- Plain text only — no markdown, no bullet points, no headers, no asterisks\n"
-        "- No salutation (no 'Dear Hiring Manager') — start directly with content\n"
-        "- No sign-off (no 'Sincerely', 'Best regards') — the GitHub line is the last line\n"
-        "- Write in first person ('I', not 'He/She')\n"
-        "- Professional but not stiff — conversational confidence\n"
-        "- STRICT word count: the body (including the GitHub line) must be between 100 and 150 words\n"
-        "- Separate the GitHub line from the rest of the body with one blank line"
+        f"\nThe email MUST end with exactly this signature block "
+        f"(separated from the body by one blank line):\n"
+        f"{signature}"
     )
 
-    return "\n\n".join(lines)
+    if GITHUB_URL:
+        lines.append(
+            f"\nMention the GitHub URL ({GITHUB_URL}) naturally within the email body "
+            f"(e.g. 'My GitHub (github.com/RaySatish) has...'). "
+            f"Do NOT put it as a separate line at the end."
+        )
+
+    lines.append(
+        "\nRULES:\n"
+        "- Output ONLY the email body text, nothing else\n"
+        "- Plain text only — no markdown, no bullet points, no headers, no asterisks, no bold\n"
+        "- Start with 'Hi,' on its own line\n"
+        "- No formal salutation (no 'Dear Hiring Manager')\n"
+        "- No formal sign-off (no 'Sincerely', 'Best regards', 'Warm regards') — "
+        "just the closing line then the signature\n"
+        "- Write in first person\n"
+        "- Sound like a real person wrote this — conversational, confident, not corporate\n"
+        "- Reference SPECIFIC projects and tech from the RESUME CONTEXT — "
+        "do not be vague or generic\n"
+        "- Keep it between 100 and 180 words (including signature)\n"
+        "- Do NOT use any asterisks (*) anywhere in the output"
+    )
+
+    return "\n".join(lines)
 
 
 def draft(
     requirements: dict,
     cover_letter_text: str,
     resume_pdf_path: str,
+    resume_content: str = "",
 ) -> tuple[str, str]:
     """Draft the application email subject and body.
 
     Returns a (subject, body) tuple. Subject is deterministic; body is
-    LLM-generated, 100–150 words, plain text, ending with the GitHub URL.
+    LLM-generated, grounded in resume_content for specificity.
     """
     from llm.client import complete
-    from config import GITHUB_URL
 
-    company = requirements.get("company", "the company")
-    role = requirements.get("role", "the role")
+    company = requirements.get("company") or "the company"
+    role = requirements.get("role") or "the role"
 
-    # ── Subject (deterministic) ──────────────────────────────────────────
+    # ── Subject (deterministic) ──────────────────────────────────────
     subject = _build_subject(requirements)
 
-    # ── Body (LLM-generated) ─────────────────────────────────────────────
+    # ── Body (LLM-generated) ─────────────────────────────────────────
     logger.info(
         "Generating email body for '%s' at '%s'", role, company
     )
 
-    prompt = _build_body_prompt(requirements, cover_letter_text, resume_pdf_path)
+    prompt = _build_body_prompt(
+        requirements, cover_letter_text, resume_content
+    )
 
     system_prompt = (
-        "You are a professional email writer for job applications. "
-        "You write concise, confident emails in plain text. "
-        "No markdown, no bullet points, no headers, no asterisks. "
-        "Always write in first person. "
-        "Output only the email body text. "
-        "Your output must be between 100 and 150 words — this is a hard constraint. "
-        "Count your words before responding and ensure compliance."
+        "You are writing a job application email on behalf of a real person. "
+        "Write like a human — casual-professional, not corporate or stiff. "
+        "Think of how a confident student would email about a job they're excited about. "
+        "No buzzwords, no filler phrases like 'I am writing to express my interest'. "
+        "Be specific — reference actual projects and tech, not vague claims. "
+        "Plain text only. No markdown. No asterisks. No bold. No bullet points. "
+        "Output only the email body."
     )
 
     try:
@@ -150,22 +206,32 @@ def draft(
         )
         raise
 
-    # ── Clean up ─────────────────────────────────────────────────────────
+    # ── Clean up ─────────────────────────────────────────────────────
     body = raw_body.strip()
 
     # Remove code fences if the LLM wraps output
     if body.startswith("```"):
-        lines = body.split("\n")
-        if lines[-1].strip() == "```":
-            lines = lines[1:-1]
-        elif lines[0].startswith("```"):
-            lines = lines[1:]
-        body = "\n".join(lines).strip()
+        body_lines = body.split("\n")
+        if body_lines[-1].strip() == "```":
+            body_lines = body_lines[1:-1]
+        elif body_lines[0].startswith("```"):
+            body_lines = body_lines[1:]
+        body = "\n".join(body_lines).strip()
 
-    # Ensure the body ends with the GitHub URL line
-    github_line = f"GitHub: {GITHUB_URL}"
-    if github_line not in body:
-        body = body.rstrip() + "\n\n" + github_line
+    # Strip any remaining asterisks (bold/italic markup)
+    body = body.replace("**", "").replace("*", "")
+
+    # Ensure signature is present
+    from config import APPLICANT_NAME, APPLICANT_EMAIL, APPLICANT_PHONE
+    sig_parts = [APPLICANT_NAME]
+    if APPLICANT_EMAIL:
+        sig_parts.append(APPLICANT_EMAIL)
+    if APPLICANT_PHONE:
+        sig_parts.append(APPLICANT_PHONE)
+    signature = " | ".join(sig_parts)
+
+    if signature not in body:
+        body = body.rstrip() + "\n\n" + signature
 
     word_count = len(body.split())
     logger.info(

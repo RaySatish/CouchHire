@@ -180,6 +180,41 @@ FINAL CHECK — before returning your JSON, verify EVERY mandatory user rule:
 If ANY rule is violated, fix your JSON before returning it."""
 
 
+def _extract_outermost_json(text: str) -> str:
+    """Extract the outermost JSON object from text using brace-depth counting.
+
+    Handles arbitrarily nested JSON that regex-based approaches miss.
+    Returns the extracted JSON string, or "" if no valid object found.
+    """
+    start = text.find("{")
+    if start == -1:
+        return ""
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\":
+            if in_string:
+                escape_next = True
+            continue
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return ""
+
+
 def _clean_json_response(raw: str) -> str:
     """Strip markdown fences, thinking tags, and other wrapping from LLM JSON response."""
     text = raw.strip()
@@ -190,13 +225,10 @@ def _clean_json_response(raw: str) -> str:
     # In that case, try to extract JSON from after the reasoning, or from the
     # entire response if no JSON is found after the tag.
     if not text or (text.startswith("<think>") and "</think>" not in raw):
-        # Unclosed think tag — try to find JSON object anywhere in the raw text
-        json_match = re.search(r'\{[^{}]*"sections_to_include"[^}]*\}', raw, re.DOTALL)
-        if not json_match:
-            # Broader search: find the last { ... } block
-            json_match = re.search(r'(\{(?:[^{}]|\{[^{}]*\})*\})\s*$', raw, re.DOTALL)
-        if json_match:
-            text = json_match.group(0) if not hasattr(json_match, 'group') else json_match.group(0)
+        # Unclosed think tag — use brace-depth extraction on the raw text
+        extracted = _extract_outermost_json(raw)
+        if extracted:
+            text = extracted
         else:
             # No JSON found at all — return empty to trigger retry
             return ""
@@ -204,11 +236,9 @@ def _clean_json_response(raw: str) -> str:
     text = re.sub(r"^```(?:json)?\s*\n?", "", text)
     text = re.sub(r"\n?```\s*$", "", text)
     text = text.strip()
-    # If still empty after stripping, try to extract JSON from raw
+    # If still empty after stripping, try brace-depth extraction
     if not text:
-        json_match = re.search(r'(\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\})', raw, re.DOTALL)
-        if json_match:
-            text = json_match.group(1)
+        text = _extract_outermost_json(raw)
     # Fix LaTeX backslash escapes that break JSON parsing.
     # LLMs often copy LaTeX names verbatim (e.g. "TinyML \\& Visual").
     # These are invalid JSON escapes — replace with plain equivalents.

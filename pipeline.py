@@ -88,6 +88,10 @@ class PipelineState(TypedDict, total=False):
     _gate2_approval: str | None
     _gate2_rejection_reason: str | None
 
+    # Send status
+    email_sent: bool
+    sent_url: str | None
+
     # Error
     error: str | None
 
@@ -603,7 +607,8 @@ def node_email_drafter(state: PipelineState) -> PipelineState:
     subject, body = draft(
         state["requirements"],
         state.get("cover_letter_text") or "",
-        state["resume_pdf_path"],
+        state.get("resume_pdf_path", ""),
+        resume_content=state.get("resume_content", ""),
     )
     state["email_subject"] = subject
     state["email_body"] = body
@@ -727,11 +732,16 @@ def node_gmail_draft(state: PipelineState) -> PipelineState:
         state["draft_url"] = draft_url
         state["draft_id"] = draft_id
         logger.info("Gmail draft created: %s", draft_url)
-    except (ConnectionError, RuntimeError) as exc:
-        logger.error("Failed to create Gmail draft: %s", exc)
+    except Exception as exc:
+        logger.error(
+            "Failed to create Gmail draft: %s\n%s",
+            exc,
+            traceback.format_exc(),
+        )
         state["draft_url"] = None
         state["draft_id"] = None
-        # Non-fatal: we still notify user
+        state["error"] = f"Gmail draft creation failed: {exc}"
+        # Non-fatal: we still notify user, but error is logged and visible
 
     return state
 
@@ -860,20 +870,44 @@ def node_execute_send(state: PipelineState) -> PipelineState:
     draft_id = state.get("draft_id", "")
 
     if route in ("email", "manual"):
-        # Send the Gmail draft
-        if not draft_id:
-            logger.warning("  No draft_id — cannot send draft")
+        # Send the email via MCP (re-compose from state, since MCP has no send-draft-by-ID)
+        reqs = state.get("requirements", {})
+        recipient = reqs.get("apply_target", "") if route == "email" else ""
+        subject = state.get("email_subject", "")
+        body = state.get("email_body", "")
+
+        if not recipient:
+            logger.warning("  No recipient email — cannot send (route=%s)", route)
             return state
+        if not subject:
+            logger.warning("  No email subject — cannot send")
+            return state
+
+        attachments = []
+        if state.get("resume_pdf_path"):
+            attachments.append(state["resume_pdf_path"])
+
         try:
-            from apply.gmail_sender import send_draft
-            sent = send_draft(draft_id)
+            from apply.gmail_sender import send_email
+            sent = send_email(
+                subject=subject,
+                body=body,
+                recipient_email=recipient,
+                attachments=attachments if attachments else None,
+            )
             if sent:
-                logger.info("  Gmail draft sent successfully (draft_id=%s)", draft_id)
+                logger.info("  Email sent successfully (to=%s, subject=%s, message_id=%s)", recipient, subject, sent)
+                state["email_sent"] = True
+                # Build sent URL from message ID (sent is the message_id string)
+                if isinstance(sent, str) and sent:
+                    state["sent_url"] = f"https://mail.google.com/mail/u/0/#sent/{sent}"
+                else:
+                    state["sent_url"] = "https://mail.google.com/mail/u/0/#sent"
             else:
-                logger.warning("  send_draft returned False for draft_id=%s", draft_id)
+                logger.warning("  send_email returned False (to=%s)", recipient)
         except Exception as exc:
-            logger.error("  Failed to send draft: %s", exc)
-            state["error"] = f"send_draft failed: {exc}"
+            logger.error("  Failed to send email: %s", exc, exc_info=True)
+            state["error"] = f"send_email failed: {exc}"
 
     elif route == "form":
         # Submit the ATS form
@@ -892,7 +926,7 @@ def node_execute_send(state: PipelineState) -> PipelineState:
 @_safe_node
 def node_notify(state: PipelineState) -> PipelineState:
     """Send final Telegram notification based on route."""
-    from bot.telegram_bot import send_draft_ready, send_manual_notice
+    from bot.telegram_bot import send_draft_ready, send_manual_notice, send_sent_confirmation
 
     logger.info("▶ node_notify")
 
@@ -903,7 +937,11 @@ def node_notify(state: PipelineState) -> PipelineState:
     draft_url = state.get("draft_url")
 
     if route == "email":
-        if draft_url:
+        if state.get("email_sent"):
+            # Email was sent after Gate 2 approval — use the actual sent message URL
+            sent_url = state.get("sent_url") or "https://mail.google.com/mail/u/0/#sent"
+            send_sent_confirmation(company=company, role=role, sent_url=sent_url)
+        elif draft_url:
             send_draft_ready(company=company, role=role, draft_url=draft_url)
         else:
             send_manual_notice(company=company, role=role, draft_url=None)
@@ -918,7 +956,10 @@ def node_notify(state: PipelineState) -> PipelineState:
         # manual
         send_manual_notice(company=company, role=role, draft_url=draft_url)
 
-    _update_db_status(state, "awaiting_review")
+    if state.get("email_sent"):
+        _update_db_status(state, "sent")
+    else:
+        _update_db_status(state, "awaiting_review")
     return state
 
 
@@ -1095,7 +1136,11 @@ def route_after_threshold(state: PipelineState) -> str:
 
 
 def route_after_resume(state: PipelineState) -> str:
-    """After resume_tailor: cover_letter if required, else email_drafter."""
+    """After resume_tailor: error if failed, cover_letter if required, else email_drafter."""
+    # If resume_tailor failed, halt the pipeline — downstream nodes need resume_pdf_path
+    if state.get("error"):
+        logger.error("route_after_resume — resume_tailor failed, routing to error node")
+        return "error"
     reqs = state.get("requirements", {})
     if reqs.get("cover_letter_required", False):
         return "cover_letter"
@@ -1202,6 +1247,7 @@ def build_graph() -> StateGraph:
         {
             "cover_letter": "cover_letter",
             "email_drafter": "email_drafter",
+            "error": "error",
         },
     )
 
