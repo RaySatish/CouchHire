@@ -1485,30 +1485,30 @@ def _search_jobs(query: str, location: str) -> list[dict]:
         logger.error("python-jobspy not installed — cannot search jobs")
         sys.exit(1)
 
-    sites_raw = getattr(config, "JOBSPY_SITES", "indeed,linkedin,google")
-    sites = [s.strip() for s in sites_raw.split(",") if s.strip()]
-    country = getattr(config, "JOBSPY_COUNTRY", "USA")
-    proxies_raw = getattr(config, "JOBSPY_PROXIES", None)
-    proxies = (
-        [p.strip() for p in proxies_raw.split(",") if p.strip()]
-        if proxies_raw
-        else None
-    )
+    sites = getattr(config, "JOBSPY_SITES", ["indeed", "linkedin", "google"])
+    country = getattr(config, "JOBSPY_COUNTRY", "India")
+    hours_old = getattr(config, "JOBSPY_HOURS_OLD", 72)
+    proxies = getattr(config, "JOBSPY_PROXIES", None)
 
     logger.info(
-        "Searching jobs: query=%s location=%s sites=%s country=%s",
-        query, location, sites, country,
+        "Searching jobs: query=%s location=%s sites=%s country=%s hours_old=%s",
+        query, location, sites, country, hours_old,
     )
 
+    kwargs: dict = {
+        "site_name": sites,
+        "search_term": query,
+        "location": location,
+        "country_indeed": country,
+        "results_wanted": 20,
+    }
+    if proxies:
+        kwargs["proxies"] = proxies
+    if hours_old is not None:
+        kwargs["hours_old"] = hours_old
+
     try:
-        jobs_df = scrape_jobs(
-            site_name=sites,
-            search_term=query,
-            location=location,
-            country_indeed=country,
-            proxies=proxies,
-            results_wanted=20,
-        )
+        jobs_df = scrape_jobs(**kwargs)
     except Exception as exc:
         logger.error("Job search failed: %s", exc)
         return []

@@ -5,7 +5,7 @@ CV using the match scorer, filters to those above threshold, and formats
 them for Telegram display.
 
 Scoring pipeline:
-    For each job → cv_rag.retrieve_cv_sections() → match_scorer.score() → filter → sort
+    For each job → extract skills from JD → cv_rag.retrieve_cv_sections() → match_scorer.score() → filter → sort
 
 This is CPU-heavy (runs sentence-transformer inference per job). Call from
 a background thread when invoked from the Telegram bot.
@@ -24,9 +24,10 @@ def filter_and_score(jobs: list[dict]) -> list[dict]:
 
     For each job:
     1. Use the job's snippet/description as a mini-JD
-    2. Retrieve relevant CV sections via cv_rag
-    3. Score the match
-    4. Keep only jobs above MIN_MATCH_SCORE
+    2. Extract skills from the JD text via NER for better CV retrieval
+    3. Retrieve relevant CV sections via cv_rag
+    4. Score the match
+    5. Keep only jobs above MIN_MATCH_SCORE
 
     Args:
         jobs: list of job dicts from job_search.search_jobs().
@@ -41,6 +42,7 @@ def filter_and_score(jobs: list[dict]) -> list[dict]:
     from config import MIN_MATCH_SCORE, MAX_SEARCH_RESULTS
     from agents.cv_rag import retrieve_cv_sections
     from agents.match_scorer import score
+    from nlp.ner_model import extract_skills
 
     scored_jobs = []
     for job in jobs:
@@ -50,14 +52,20 @@ def filter_and_score(jobs: list[dict]) -> list[dict]:
             logger.warning("Skipping job with no description: %s", job.get("title"))
             continue
 
-        # Build a minimal requirements dict for cv_rag.retrieve_cv_sections
-        # It expects {"role": str|None, "skills": list[str]}
-        # We use the job title as role and extract no skills (let the embedder
-        # match on the full text via the role field)
+        # Build a requirements dict for cv_rag.retrieve_cv_sections.
+        # Extract skills from the JD text so cv_rag gets a richer query
+        # instead of relying solely on the job title.
+        jd_skills = extract_skills(jd_text)
         requirements = {
             "role": job.get("title", ""),
-            "skills": [],
+            "skills": jd_skills,
         }
+
+        logger.debug(
+            "Job '%s': extracted %d skills for CV retrieval",
+            job.get("title"),
+            len(jd_skills),
+        )
 
         # Retrieve relevant CV sections
         try:
@@ -138,7 +146,7 @@ def format_unscored_list(jobs: list[dict]) -> str:
         if location:
             line += f"\n   📍 {html.escape(location)}"
         if url:
-            line += f"\n   🔗 <a href=\"{url}\">View Job</a>"
+            line += f'\n   🔗 <a href="{url}">View Job</a>'
         lines.append(line)
 
     lines.append(

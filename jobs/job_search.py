@@ -21,21 +21,36 @@ def search_jobs(
     location: str = "",
     job_type: str = "",
     remote: bool = False,
-    country: str = "USA",
+    country: str | None = None,
     results_wanted: int = 25,
-    hours_old: int | None = 72,
+    hours_old: int | None = None,
     site_names: list[str] | None = None,
 ) -> list[dict]:
     """Search multiple job boards via JobSpy and return normalised results."""
     from jobspy import scrape_jobs  # lazy import — avoids error if not installed
     import pandas as pd
 
+    # Resolve defaults from config for site_names, country, and hours_old
     if site_names is None:
         try:
             from config import JOBSPY_SITES
             site_names = JOBSPY_SITES
         except ImportError:
             site_names = ["indeed", "linkedin", "google"]
+
+    if country is None:
+        try:
+            from config import JOBSPY_COUNTRY
+            country = JOBSPY_COUNTRY
+        except ImportError:
+            country = "USA"
+
+    if hours_old is None:
+        try:
+            from config import JOBSPY_HOURS_OLD
+            hours_old = JOBSPY_HOURS_OLD
+        except ImportError:
+            hours_old = 72
 
     # Map job_type to JobSpy expected values
     _valid_types = {"fulltime", "parttime", "internship", "contract"}
@@ -69,6 +84,14 @@ def search_jobs(
             kwargs["proxies"] = JOBSPY_PROXIES
     except ImportError:
         pass
+
+    # Fetch full LinkedIn descriptions (slower but needed for match scoring)
+    try:
+        from config import LINKEDIN_FETCH_DESCRIPTION
+        if LINKEDIN_FETCH_DESCRIPTION:
+            kwargs["linkedin_fetch_description"] = True
+    except ImportError:
+        kwargs["linkedin_fetch_description"] = True  # default to True
 
     try:
         df = scrape_jobs(**kwargs)

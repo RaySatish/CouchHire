@@ -155,7 +155,7 @@ RETRAIN_EVERY: int = int(_raw_retrain_every) if _raw_retrain_every is not None e
 # Minimum match score (0-100) to include a job in search results.
 # Jobs below this threshold are filtered out before showing to user.
 _raw_min_score = _env("MIN_MATCH_SCORE")
-MIN_MATCH_SCORE: float = float(_raw_min_score) if _raw_min_score is not None else 60.0
+MIN_MATCH_SCORE: float = float(_raw_min_score) if _raw_min_score is not None else float(MATCH_THRESHOLD)
 
 # Maximum number of job results to show the user after filtering.
 _raw_max_results = _env("MAX_SEARCH_RESULTS")
@@ -170,6 +170,14 @@ JOBSPY_COUNTRY: str = _env("JOBSPY_COUNTRY") or "USA"
 # Proxy list for JobSpy (comma-separated, optional)
 _raw_proxies = _env("JOBSPY_PROXIES")
 JOBSPY_PROXIES: list[str] | None = [p.strip() for p in _raw_proxies.split(",")] if _raw_proxies else None
+
+# How many hours old a job posting can be (default: 72 = 3 days). Set to 168 for a week.
+_raw_hours_old = _env("JOBSPY_HOURS_OLD")
+JOBSPY_HOURS_OLD: int | None = int(_raw_hours_old) if _raw_hours_old is not None else 72
+
+# Fetch full descriptions from LinkedIn job pages (slower but required for scoring).
+_raw_linkedin_fetch = _env("LINKEDIN_FETCH_DESCRIPTION")
+LINKEDIN_FETCH_DESCRIPTION: bool = (_raw_linkedin_fetch or "true").lower() in ("true", "1", "yes")
 
 # ---------------------------------------------------------------------------
 # Validation — runs on import

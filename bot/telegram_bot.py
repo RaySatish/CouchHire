@@ -743,10 +743,13 @@ async def _handle_search(update: Update, context) -> None:
             if not scored_jobs:
                 # Check if ALL jobs were skipped due to missing descriptions
                 # (common with LinkedIn scraping — returns titles but no text)
-                has_descriptions = any(
-                    (j.get("description") or j.get("snippet") or "")
-                    for j in raw_jobs
+                # Count jobs with meaningful descriptions (>50 chars, not "None")
+                desc_count = sum(
+                    1 for j in raw_jobs
+                    if len((j.get("description") or j.get("snippet") or "").strip()) > 50
+                    and (j.get("description") or "") not in ("None", "nan")
                 )
+                has_descriptions = desc_count > len(raw_jobs) * 0.3  # at least 30% have descriptions
                 if not has_descriptions:
                     # Fallback: show unscored individual cards
                     count = min(len(raw_jobs), 10)
@@ -804,7 +807,7 @@ async def _handle_search(update: Update, context) -> None:
             )
             send_notification(header)
 
-            for i, job in enumerate(scored_jobs[:5]):  # Top 5 get individual cards
+            for i, job in enumerate(scored_jobs):
                 title = html.escape(job.get("title", "Unknown"))
                 company = html.escape(job.get("company", "Unknown"))
                 score_val = job.get("match_score", 0)
