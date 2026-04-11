@@ -106,6 +106,49 @@ def filter_and_score(jobs: list[dict]) -> list[dict]:
     return scored_jobs
 
 
+
+def format_unscored_list(jobs: list[dict]) -> str:
+    """Format unscored jobs (no descriptions) into a Telegram HTML message.
+
+    Used as a fallback when JobSpy returns jobs without description text,
+    making CV-based scoring impossible. Shows titles, companies, and links
+    so the user can still browse results manually.
+
+    Args:
+        jobs: list of raw job dicts from job_search.search_jobs().
+
+    Returns:
+        Formatted HTML string for Telegram.
+    """
+    if not jobs:
+        return "😕 No matching jobs found."
+
+    lines = [
+        f"🔍 <b>Found {len(jobs)} job{'s' if len(jobs) != 1 else ''}</b> "
+        f"(unscored — descriptions unavailable):\n"
+    ]
+
+    for i, job in enumerate(jobs[:10], 1):
+        title = html.escape(job.get("title", "Unknown"))
+        company = html.escape(job.get("company", "Unknown"))
+        location = job.get("location", "")
+        url = job.get("url", "")
+
+        line = f"{i}. <b>{title}</b> — {company}"
+        if location:
+            line += f"\n   📍 {html.escape(location)}"
+        if url:
+            line += f"\n   🔗 <a href=\"{url}\">View Job</a>"
+        lines.append(line)
+
+    lines.append(
+        "\n⚠️ <i>Job boards returned no descriptions, so match scoring "
+        "was skipped. Browse manually or try different keywords.</i>"
+    )
+
+    return "\n\n".join(lines)
+
+
 def format_job_list(scored_jobs: list[dict]) -> str:
     """Format scored jobs into a Telegram HTML message.
 

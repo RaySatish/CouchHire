@@ -726,7 +726,7 @@ async def _handle_search(update: Update, context) -> None:
 
         try:
             from jobs.job_search import search_jobs
-            from jobs.job_filter import filter_and_score, format_job_list
+            from jobs.job_filter import filter_and_score
             from config import MIN_MATCH_SCORE
 
             # 1. Search job boards
@@ -741,17 +741,69 @@ async def _handle_search(update: Update, context) -> None:
             scored_jobs = filter_and_score(raw_jobs)
 
             if not scored_jobs:
-                send_notification(
-                    f"😕 Found {len(raw_jobs)} jobs but none scored above "
-                    f"your {MIN_MATCH_SCORE}% threshold. Try broader keywords."
+                # Check if ALL jobs were skipped due to missing descriptions
+                # (common with LinkedIn scraping — returns titles but no text)
+                has_descriptions = any(
+                    (j.get("description") or j.get("snippet") or "")
+                    for j in raw_jobs
                 )
+                if not has_descriptions:
+                    # Fallback: show unscored individual cards
+                    count = min(len(raw_jobs), 10)
+                    header = (
+                        f"🔍 <b>Found {count} job{'s' if count != 1 else ''}</b> "
+                        f"(descriptions unavailable — showing unscored):"
+                    )
+                    send_notification(header)
+
+                    # Store raw jobs in cache so Apply callback can find them
+                    _search_results_cache = raw_jobs[:10]
+
+                    for i, job in enumerate(raw_jobs[:10]):
+                        title = html.escape(job.get("title", "Unknown"))
+                        company = html.escape(job.get("company", "Unknown"))
+                        location_text = job.get("location", "")
+                        job_url = job.get("url", "")
+
+                        card_text = (
+                            f"📋 <b>{title}</b>\n"
+                            f"🏢 {company}"
+                        )
+                        if location_text:
+                            card_text += f"\n📍 {html.escape(str(location_text))}"
+
+                        buttons = []
+                        if job_url:
+                            buttons.append(
+                                InlineKeyboardButton(
+                                    "✅ Apply",
+                                    callback_data=f"apply_{i}_{hash(job_url) % 10000}",
+                                )
+                            )
+                            buttons.append(
+                                InlineKeyboardButton("🔗 View Job", url=job_url),
+                            )
+                        if buttons:
+                            keyboard = InlineKeyboardMarkup([buttons])
+                            send_notification(card_text, reply_markup=keyboard)
+                        else:
+                            send_notification(card_text)
+
+
+                else:
+                    send_notification(
+                        f"😕 Found {len(raw_jobs)} jobs but none scored above "
+                        f"your {MIN_MATCH_SCORE}% threshold. Try broader keywords."
+                    )
                 return
 
-            # 3. Format and send results summary
-            results_text = format_job_list(scored_jobs)
-            send_notification(results_text)
+            # 3. Send header + individual job cards with [Apply] buttons
+            header = (
+                f"🔍 <b>Found {len(scored_jobs)} matching "
+                f"job{'s' if len(scored_jobs) != 1 else ''}:</b>"
+            )
+            send_notification(header)
 
-            # 4. Send each top job as a separate card with [Apply] button
             for i, job in enumerate(scored_jobs[:5]):  # Top 5 get individual cards
                 title = html.escape(job.get("title", "Unknown"))
                 company = html.escape(job.get("company", "Unknown"))
