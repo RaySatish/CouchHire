@@ -315,22 +315,47 @@ def send_form_started(company: str, role: str) -> None:
     send_notification(text)
 
 
-def send_manual_notice(company: str, role: str, draft_url: str | None = None) -> None:
-    """Send a notification when no apply method was found (manual route)."""
+def send_form_submitted(company: str, role: str, form_url: str | None = None) -> None:
+    """Send a confirmation that the ATS form was submitted successfully."""
     safe_company = _escape_html(company)
     safe_role = _escape_html(role)
 
     text = (
+        f"\u2705 <b>Application Submitted!</b>\n"
+        f"\n"
+        f"Your application for <b>{safe_company} \u2014 {safe_role}</b> "
+        f"was submitted successfully via the ATS form."
+    )
+    buttons = []
+    if form_url:
+        buttons.append([InlineKeyboardButton("\ud83d\udd17 View Application", url=form_url)])
+    markup = InlineKeyboardMarkup(buttons) if buttons else None
+    send_notification(text, reply_markup=markup)
+
+
+def send_manual_notice(company: str, role: str, draft_url: str | None = None, job_url: str | None = None, notes: str | None = None) -> None:
+    """Send a notification when no apply method was found or form fill failed."""
+    safe_company = _escape_html(company)
+    safe_role = _escape_html(role)
+
+    # Use notes for context-specific messaging (e.g. expired job)
+    if notes:
+        detail = _escape_html(notes)
+    else:
+        detail = f"No apply method found for: <b>{safe_company} — {safe_role}</b>."
+
+    text = (
         f"⚠️ <b>Manual Application Required</b>\n"
         f"\n"
-        f"No apply method found for: <b>{safe_company} — {safe_role}</b>.\n"
+        f"{detail}\n"
         f"Resume and cover letter have been generated. Apply manually."
     )
-    markup = None
+    buttons = []
     if draft_url:
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📧 Review Draft", url=draft_url)]
-        ])
+        buttons.append([InlineKeyboardButton("📧 Review Draft", url=draft_url)])
+    if job_url:
+        buttons.append([InlineKeyboardButton("🔗 Apply Here", url=job_url)])
+    markup = InlineKeyboardMarkup(buttons) if buttons else None
     send_notification(text, reply_markup=markup)
 
 
@@ -670,7 +695,7 @@ async def _handle_apply(update: Update, context) -> None:
         from pipeline import run_pipeline
         try:
             if input_type == "url":
-                run_pipeline(url=job_url, source="telegram")
+                run_pipeline(jd_url=job_url, source="telegram")
             else:
                 run_pipeline(jd_text=raw_input, source="telegram")
         except Exception as exc:
@@ -925,7 +950,8 @@ async def _handle_callback(update: Update, context) -> None:
                     from pipeline import run_pipeline
                     run_pipeline(
                         jd_text=full_jd,
-                        url=job.get("url", ""),
+                        jd_url=job.get("url", ""),
+                        job_url_direct=job.get("job_url_direct", ""),
                         source="search",
                     )
                 except Exception as exc:

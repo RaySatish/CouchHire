@@ -3,6 +3,9 @@
 Searches multiple job boards (Indeed, LinkedIn, Glassdoor, Google, ZipRecruiter)
 concurrently using the JobSpy library. No API keys or OAuth required.
 
+Each site is scraped individually so that a failure on one board (e.g. Google
+rate-limiting with 429) does not discard results from the others.
+
 Public API:
     search_jobs(query, location, job_type, remote, country, results_wanted, hours_old) -> list[dict]
     get_job_details(job_url) -> dict  (returns what we already have — JobSpy gives full descriptions)
@@ -59,9 +62,8 @@ def search_jobs(
         logger.warning("Unknown job_type '%s', ignoring. Valid: %s", job_type, _valid_types)
         mapped_type = ""
 
-    # Build kwargs — only pass optional params when they have values
-    kwargs: dict[str, Any] = {
-        "site_name": site_names,
+    # Build base kwargs — only pass optional params when they have values
+    base_kwargs: dict[str, Any] = {
         "search_term": query,
         "results_wanted": results_wanted,
         "country_indeed": country,
@@ -69,19 +71,19 @@ def search_jobs(
         "verbose": 0,
     }
     if location:
-        kwargs["location"] = location
+        base_kwargs["location"] = location
     if mapped_type:
-        kwargs["job_type"] = mapped_type
+        base_kwargs["job_type"] = mapped_type
     if remote:
-        kwargs["is_remote"] = True
+        base_kwargs["is_remote"] = True
     if hours_old is not None:
-        kwargs["hours_old"] = hours_old
+        base_kwargs["hours_old"] = hours_old
 
     # Inject proxies from config if available
     try:
         from config import JOBSPY_PROXIES
         if JOBSPY_PROXIES:
-            kwargs["proxies"] = JOBSPY_PROXIES
+            base_kwargs["proxies"] = JOBSPY_PROXIES
     except ImportError:
         pass
 
@@ -89,25 +91,53 @@ def search_jobs(
     try:
         from config import LINKEDIN_FETCH_DESCRIPTION
         if LINKEDIN_FETCH_DESCRIPTION:
-            kwargs["linkedin_fetch_description"] = True
+            base_kwargs["linkedin_fetch_description"] = True
     except ImportError:
-        kwargs["linkedin_fetch_description"] = True  # default to True
+        base_kwargs["linkedin_fetch_description"] = True  # default to True
 
-    try:
-        df = scrape_jobs(**kwargs)
-    except Exception as exc:
-        logger.error("JobSpy scrape_jobs() failed: %s", exc, exc_info=True)
+    # -----------------------------------------------------------------------
+    # Scrape each site individually so one site's failure doesn't kill the rest.
+    # JobSpy's internal concurrent.futures propagates exceptions from any site
+    # when multiple sites are passed together, discarding successful results.
+    # -----------------------------------------------------------------------
+    all_dfs: list[pd.DataFrame] = []
+    failed_sites: list[str] = []
+
+    for site in site_names:
+        site_kwargs = {**base_kwargs, "site_name": [site]}
+        try:
+            df = scrape_jobs(**site_kwargs)
+            if df is not None and not df.empty:
+                logger.info("JobSpy: %s returned %d results for '%s'", site, len(df), query)
+                all_dfs.append(df)
+            else:
+                logger.info("JobSpy: %s returned 0 results for '%s'", site, query)
+        except Exception as exc:
+            failed_sites.append(site)
+            logger.warning("JobSpy: %s failed (skipping): %s", site, exc)
+
+    if failed_sites:
+        logger.info(
+            "JobSpy: %d/%d sites failed (%s), continuing with results from the rest",
+            len(failed_sites), len(site_names), ", ".join(failed_sites),
+        )
+
+    if not all_dfs:
+        logger.info("JobSpy returned 0 results from all sites for query '%s'", query)
         return []
 
-    if df is None or df.empty:
-        logger.info("JobSpy returned 0 results from %s for query '%s'", site_names, query)
-        return []
+    # Merge all successful DataFrames
+    merged_df = pd.concat(all_dfs, ignore_index=True)
+
+    # Deduplicate by job URL (same job can appear on multiple boards)
+    if "job_url" in merged_df.columns:
+        merged_df = merged_df.drop_duplicates(subset=["job_url"], keep="first")
 
     results: list[dict] = []
-    for _, row in df.iterrows():
+    for _, row in merged_df.iterrows():
         results.append(_row_to_dict(row, pd))
 
-    logger.info("JobSpy returned %d results from %s for query '%s'", len(results), site_names, query)
+    logger.info("JobSpy returned %d total results from %s for query '%s'", len(results), site_names, query)
     return results
 
 
@@ -157,6 +187,7 @@ def _row_to_dict(row: Any, pd: Any) -> dict:
         "title": _safe(row.get("title")),
         "company": _safe(row.get("company")),
         "url": _safe(row.get("job_url")),
+        "job_url_direct": _safe(row.get("job_url_direct")),
         "location": location,
         "description": _safe(row.get("description")),
         "salary": salary,

@@ -232,6 +232,119 @@ def _extract_outermost_json(text: str) -> str:
     return ""
 
 
+def _repair_truncated_json(text: str) -> str:
+    """Attempt to repair truncated JSON by closing open strings, arrays, and objects.
+
+    When LLMs hit max_tokens, they truncate mid-JSON. This function tries to
+    make the partial JSON parseable by closing open structures.
+
+    Returns the repaired JSON string, or "" if repair is not possible.
+    """
+    import json as _json
+
+    start = text.find("{")
+    if start == -1:
+        return ""
+
+    fragment = text[start:]
+
+    # Walk through to find the JSON state at the truncation point
+    in_string = False
+    escape_next = False
+    stack = []  # track nesting: '{' or '['
+    last_comma_outside_string = -1
+
+    for idx, ch in enumerate(fragment):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        # Outside any string
+        if ch == ",":
+            last_comma_outside_string = idx
+        if ch in "{[":
+            stack.append(ch)
+        elif ch == "}":
+            if stack and stack[-1] == "{":
+                stack.pop()
+        elif ch == "]":
+            if stack and stack[-1] == "[":
+                stack.pop()
+
+    if not stack:
+        return ""  # JSON is already complete
+
+    # Strategy 1: Close the string if we are inside one, then close all structures
+    repaired = fragment
+    if in_string:
+        repaired += '"'
+
+    # Trim trailing incomplete entry (after last comma)
+    stripped = repaired.rstrip()
+    if stripped.endswith(","):
+        stripped = stripped[:-1]
+
+    # Close all open structures
+    closers = ""
+    for opener in reversed(stack):
+        closers += "}" if opener == "{" else "]"
+    attempt1 = stripped + closers
+
+    try:
+        _json.loads(attempt1)
+        return attempt1
+    except _json.JSONDecodeError:
+        pass
+
+    # Strategy 2: Truncate at last comma outside a string, then close structures
+    if last_comma_outside_string > 0:
+        trimmed = fragment[:last_comma_outside_string]
+        # Recount the stack for this shorter fragment
+        in_str2 = False
+        esc2 = False
+        stack2 = []
+        for c in trimmed:
+            if esc2:
+                esc2 = False
+                continue
+            if c == "\\" and in_str2:
+                esc2 = True
+                continue
+            if c == '"' and not esc2:
+                in_str2 = not in_str2
+                continue
+            if in_str2:
+                continue
+            if c in "{[":
+                stack2.append(c)
+            elif c == "}":
+                if stack2 and stack2[-1] == "{":
+                    stack2.pop()
+            elif c == "]":
+                if stack2 and stack2[-1] == "[":
+                    stack2.pop()
+
+        closers2 = ""
+        for opener in reversed(stack2):
+            closers2 += "}" if opener == "{" else "]"
+        attempt2 = trimmed + closers2
+
+        try:
+            _json.loads(attempt2)
+            return attempt2
+        except _json.JSONDecodeError:
+            pass
+
+    return ""
+
+
 def _clean_json_response(raw: str) -> str:
     """Strip markdown fences, thinking tags, and other wrapping from LLM JSON response."""
     text = raw.strip()
@@ -274,6 +387,20 @@ def _clean_json_response(raw: str) -> str:
         "",
         text,
     )
+    # If the cleaned text looks like truncated JSON (has '{' but won't parse),
+    # try to repair it by closing open strings/arrays/objects.
+    if text and "{" in text:
+        import json as _json
+        try:
+            _json.loads(text)
+        except _json.JSONDecodeError:
+            repaired = _repair_truncated_json(text)
+            if repaired:
+                logger.info(
+                    "Repaired truncated JSON (%d chars -> %d chars)",
+                    len(text), len(repaired),
+                )
+                return repaired
     return text
 
 
@@ -1300,7 +1427,7 @@ Return ONLY the (possibly corrected) JSON. No commentary, no markdown fences."""
     )
 
     try:
-        raw = complete(verify_prompt, system_prompt=verify_system)
+        raw = complete(verify_prompt, system_prompt=verify_system, max_tokens=4096)
         cleaned = _clean_json_response(raw)
         verified = json.loads(cleaned)
 
@@ -1400,7 +1527,7 @@ def select_content(
             logger.info("Waiting %ds before retry (rate limit backoff)", delay)
             _time.sleep(delay)
 
-        raw_response = complete(prompt, system_prompt=_SYSTEM_PROMPT)
+        raw_response = complete(prompt, system_prompt=_SYSTEM_PROMPT, max_tokens=4096)
         cleaned = _clean_json_response(raw_response)
 
         try:

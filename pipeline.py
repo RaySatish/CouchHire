@@ -44,6 +44,7 @@ class PipelineState(TypedDict, total=False):
     # Input
     jd_text: str
     jd_url: str | None
+    job_url_direct: str | None  # direct ATS application URL (from JobSpy)
     source: str  # "cli" | "telegram" | "dashboard"
 
     # Parsed
@@ -123,6 +124,108 @@ def _safe_node(fn):
 
 
 # ---------------------------------------------------------------------------
+# ATS URL detection helper
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+# Patterns that indicate an actual ATS application form (not a job listing).
+# Order: most specific first.  All patterns are case-insensitive.
+_ATS_FORM_PATTERNS: list[_re.Pattern[str]] = [
+    # Major ATS platforms
+    _re.compile(r"greenhouse\.io/", _re.I),
+    _re.compile(r"boards\.greenhouse\.io/", _re.I),
+    _re.compile(r"lever\.co/", _re.I),
+    _re.compile(r"jobs\.lever\.co/", _re.I),
+    _re.compile(r"myworkday(jobs)?\.com/", _re.I),
+    _re.compile(r"\.workday\.com/", _re.I),
+    _re.compile(r"ashbyhq\.com/", _re.I),
+    _re.compile(r"jobs\.ashbyhq\.com/", _re.I),
+    _re.compile(r"smartrecruiters\.com/", _re.I),
+    _re.compile(r"jobvite\.com/", _re.I),
+    _re.compile(r"icims\.com/", _re.I),
+    _re.compile(r"breezy\.hr/", _re.I),
+    _re.compile(r"recruitee\.com/", _re.I),
+    _re.compile(r"bamboohr\.com/", _re.I),
+    _re.compile(r"jazz\.co/", _re.I),
+    _re.compile(r"apply\.workable\.com/", _re.I),
+    _re.compile(r"taleo\.net/", _re.I),
+    _re.compile(r"successfactors\.com/", _re.I),
+    _re.compile(r"phenom(?:people)?\.com/", _re.I),
+    # URL path contains /apply (common across many ATS)
+    _re.compile(r"/apply(?:/|$|\?)", _re.I),
+]
+
+# Patterns that indicate a job *listing* page (NOT an application form).
+_JOB_LISTING_PATTERNS: list[_re.Pattern[str]] = [
+    _re.compile(r"indeed\.com/viewjob", _re.I),
+    _re.compile(r"indeed\.com/jobs\?", _re.I),
+    _re.compile(r"indeed\.com/rc/", _re.I),
+    _re.compile(r"linkedin\.com/jobs/view/", _re.I),
+    _re.compile(r"linkedin\.com/jobs/search/", _re.I),
+    _re.compile(r"glassdoor\.com/job-listing/", _re.I),
+    _re.compile(r"glassdoor\.com/Job/", _re.I),
+    _re.compile(r"ziprecruiter\.com/jobs/", _re.I),
+    _re.compile(r"naukri\.com/job-listings", _re.I),
+    _re.compile(r"monster\.com/job-openings", _re.I),
+    _re.compile(r"google\.com/search\?.*udm=8", _re.I),
+]
+
+
+def _is_ats_form_url(url: str) -> bool:
+    """Return True only if *url* looks like an ATS application form.
+
+    Returns False for generic job listing pages (Indeed, LinkedIn, etc.)
+    where there is no form to fill — those should stay on the manual route.
+    """
+    # Reject known listing pages first (higher priority)
+    for pat in _JOB_LISTING_PATTERNS:
+        if pat.search(url):
+            return False
+
+    # Accept known ATS form domains / paths
+    for pat in _ATS_FORM_PATTERNS:
+        if pat.search(url):
+            return True
+
+    # Unknown URL — don't guess; stay manual
+    return False
+
+
+
+# Patterns that suggest a URL is a generic careers landing page (not a specific job)
+_GENERIC_CAREERS_PATTERNS: list[_re.Pattern[str]] = [
+    _re.compile(r"^https?://[^/]+/careers/?(\?.*)?$", _re.I),   # domain.com/careers
+    _re.compile(r"^https?://[^/]+/jobs/?(\?.*)?$", _re.I),      # domain.com/jobs
+    _re.compile(r"^https?://careers\.[^/]+/?(\?.*)?$", _re.I),   # careers.domain.com (root)
+    _re.compile(r"^https?://careers\.[^/]+/[a-z]{2}(/[a-z]{2})?/?(\?.*)?$", _re.I),  # careers.domain.com/us/en/
+    _re.compile(r"^https?://[^/]+/career/?(\?.*)?$", _re.I),     # domain.com/career
+]
+
+# Patterns that suggest a URL points to a specific job (has a job ID or path)
+_SPECIFIC_JOB_PATTERNS: list[_re.Pattern[str]] = [
+    _re.compile(r"/job/", _re.I),
+    _re.compile(r"/jobs/[^?]", _re.I),          # /jobs/ followed by something (not just query)
+    _re.compile(r"/position/", _re.I),
+    _re.compile(r"/opening/", _re.I),
+    _re.compile(r"/requisition/", _re.I),
+    _re.compile(r"/posting/", _re.I),
+    _re.compile(r"/apply/", _re.I),
+    _re.compile(r"/vacancy/", _re.I),
+]
+
+
+def _is_generic_careers_page(url: str) -> bool:
+    """Return True if the URL looks like a generic careers homepage, not a specific job."""
+    return any(p.search(url) for p in _GENERIC_CAREERS_PATTERNS)
+
+
+def _url_has_job_path(url: str) -> bool:
+    """Return True if the URL contains a path suggesting a specific job listing."""
+    return any(p.search(url) for p in _SPECIFIC_JOB_PATTERNS)
+
+
+# ---------------------------------------------------------------------------
 # Node functions
 #
 # Each node reads from / writes to `state` per the Agent Contracts table
@@ -174,11 +277,90 @@ class _HTMLToText(_StdlibHTMLParser):
         return raw.strip()
 
 
+def _normalize_apply_url(url: str) -> tuple[str, bool]:
+    """Convert an /apply form URL back to the JD page URL when possible.
+
+    Many ATS platforms use /apply?... or .../apply paths for the form page.
+    These pages require session state and can't be scraped directly.
+    This converts them back to the JD page URL which is publicly accessible.
+
+    Returns (normalized_url, was_converted).
+    """
+    from urllib.parse import urlparse, parse_qs
+
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+
+    # Pattern 1: Phenom — /us/en/apply?jobSeqNo=XXX → /us/en/job/XXX
+    if "/apply" in path and "jobSeqNo" in (parsed.query or ""):
+        qs = parse_qs(parsed.query)
+        job_seq = qs.get("jobSeqNo", [None])[0]
+        if job_seq:
+            new_path = path.replace("/apply", f"/job/{job_seq}")
+            new_url = parsed._replace(path=new_path, query="").geturl()
+            return new_url, True
+
+    # Pattern 2: Greenhouse/Lever/Workday — .../jobs/ID/apply → .../jobs/ID
+    if path.endswith("/apply"):
+        new_path = path[:-6]  # strip /apply
+        # Only convert if the remaining path still has substance
+        if len(new_path) > 1:
+            new_url = parsed._replace(path=new_path, query="").geturl()
+            return new_url, True
+
+    return url, False
+
+
 def _html_to_text(html: str) -> str:
     """Convert HTML to plain text using stdlib html.parser."""
     parser = _HTMLToText()
     parser.feed(html)
     return parser.get_text()
+
+
+
+def _scrape_with_playwright(url: str, timeout_ms: int = 20000) -> str:
+    """Scrape a URL using headless Playwright (renders JavaScript).
+
+    Fallback for JS-heavy ATS pages (iCIMS, Workday, Greenhouse, etc.)
+    that return empty content with plain HTTP requests.
+    Returns extracted plain text, or empty string on failure.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logger.warning("  Playwright not installed — cannot JS-render page")
+        return ""
+
+    logger.info("  Falling back to Playwright for JS-rendered scrape: %s", url)
+    text = ""
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/124.0.0.0 Safari/537.36"
+            )
+            page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            # Wait a bit extra for late-loading JS content
+            page.wait_for_timeout(3000)
+            # Extract text directly from rendered DOM — much more reliable
+            # than re-parsing page.content() HTML through our simple parser,
+            # because Playwright already has the fully rendered DOM tree.
+            try:
+                text = page.inner_text("body")
+            except Exception:
+                # Fallback: parse raw HTML if inner_text fails
+                html = page.content()
+                text = _html_to_text(html)
+            browser.close()
+    except Exception as exc:
+        logger.warning("  Playwright scrape failed: %s", exc)
+        return ""
+
+    logger.info("  Playwright scraped %d chars", len(text))
+    return text
 
 
 # ── LaTeX-to-plain-text converter ──────────────────────────────────────
@@ -334,6 +516,12 @@ def node_scrape_jd(state: PipelineState) -> PipelineState:
         state["error"] = "No JD text or URL provided."
         return state
 
+    # Normalize /apply URLs back to JD page URLs (apply pages need session state)
+    url, was_normalized = _normalize_apply_url(url)
+    if was_normalized:
+        logger.info("  Converted apply form URL to JD page URL: %s", url)
+        state["jd_url"] = url  # Update state so downstream nodes use the JD URL
+
     logger.info("  Scraping JD from URL: %s", url)
 
     try:
@@ -346,7 +534,11 @@ def node_scrape_jd(state: PipelineState) -> PipelineState:
         scraped = _html_to_text(html_text)
 
         if len(scraped) < 50:
-            logger.warning("  Scraped text too short (%d chars) — may not be a JD", len(scraped))
+            logger.warning("  urllib scraped only %d chars — trying Playwright (JS render)", len(scraped))
+            scraped = _scrape_with_playwright(url)
+
+        if len(scraped) < 50:
+            logger.warning("  Scraped text too short (%d chars) even after Playwright — may not be a JD", len(scraped))
             state["error"] = f"Scraped page too short ({len(scraped)} chars). Provide JD text directly."
             return state
 
@@ -682,6 +874,132 @@ def node_apply_router(state: PipelineState) -> PipelineState:
 
     logger.info("▶ node_apply_router")
     apply_route = route(state["requirements"])
+
+    # Fallback: if jd_parser found no apply method but we have a job URL
+    # (e.g. from /search results), use that URL as the form application
+    # target.
+    job_url_direct = (state.get("job_url_direct") or "").strip()
+    jd_url = (state.get("jd_url") or "").strip()
+
+    logger.info(
+        "DEBUG route_apply: source=%s, job_url_direct=%r, jd_url=%r, initial_route=%s",
+        state.get("source"), job_url_direct, jd_url, apply_route,
+    )
+
+    # --- Validate LLM's apply_target when route is already "form" ---
+    # The LLM sometimes extracts a generic careers homepage (e.g. domain.com/careers)
+    # from the JD text instead of the actual job application URL.  When the user
+    # provided a specific job URL via /apply <url>, that jd_url is far more useful.
+    if apply_route == "form":
+        llm_target = (state["requirements"].get("apply_target") or "").strip()
+        if llm_target and jd_url and llm_target != jd_url:
+            llm_is_generic = _is_generic_careers_page(llm_target)
+            jd_is_specific = _url_has_job_path(jd_url)
+            if llm_is_generic and jd_is_specific:
+                logger.info(
+                    "LLM apply_target is a generic careers page (%s) — "
+                    "overriding with jd_url which has a specific job path: %s",
+                    llm_target, jd_url,
+                )
+                state["requirements"]["apply_target"] = jd_url
+            elif llm_is_generic and not jd_is_specific:
+                # LLM found a generic page, jd_url also doesn't look job-specific
+                # — prefer jd_url anyway since the user explicitly provided it
+                logger.info(
+                    "LLM apply_target is a generic careers page (%s) — "
+                    "overriding with user-provided jd_url: %s",
+                    llm_target, jd_url,
+                )
+                state["requirements"]["apply_target"] = jd_url
+
+    # Priority 0: /search source with job_url_direct — the user explicitly
+    # clicked "Apply" on a search result.  JobSpy's job_url_direct is the
+    # actual ATS application redirect URL.  Trust it unconditionally.
+    if apply_route == "manual" and state.get("source") == "search" and job_url_direct:
+        reqs = state["requirements"]
+        reqs["apply_method"] = "url"
+        reqs["apply_target"] = job_url_direct
+        apply_route = "form"
+        logger.info(
+            "Route set to form — /search source with job_url_direct: %s",
+            job_url_direct,
+        )
+    # Priority 0.5: /search source WITHOUT job_url_direct — JobSpy didn't
+    # provide a direct ATS URL, but we still have the listing page URL
+    # (jd_url).  Only use it if it's NOT a known job board listing page
+    # (LinkedIn, Indeed, etc.) — those require login and have no fillable form.
+    elif apply_route == "manual" and state.get("source") == "search" and jd_url:
+        _jd_is_listing = any(p.search(jd_url) for p in _JOB_LISTING_PATTERNS)
+        if not _jd_is_listing:
+            reqs = state["requirements"]
+            reqs["apply_method"] = "url"
+            reqs["apply_target"] = jd_url
+            apply_route = "form"
+            logger.info(
+                "Route set to form — /search source, no job_url_direct, "
+                "jd_url is not a listing page: %s",
+                jd_url,
+            )
+        else:
+            logger.info(
+                "Route stays manual — jd_url is a job board listing page "
+                "(no direct ATS URL available): %s",
+                jd_url,
+            )
+    # Priority 1: job_url_direct from non-search sources — trust it unless
+    # it's a known job listing page (Indeed viewjob, LinkedIn jobs, etc.).
+    elif apply_route == "manual" and job_url_direct:
+        _is_listing = any(p.search(job_url_direct) for p in _JOB_LISTING_PATTERNS)
+        if not _is_listing:
+            reqs = state["requirements"]
+            reqs["apply_method"] = "url"
+            reqs["apply_target"] = job_url_direct
+            apply_route = "form"
+            logger.info(
+                "Route overridden to form — direct ATS URL from job board: %s",
+                job_url_direct,
+            )
+        else:
+            logger.info(
+                "job_url_direct is a listing page, not an ATS form: %s",
+                job_url_direct,
+            )
+    # Priority 1.5: source=telegram — user explicitly sent a URL via /apply <url>.
+    # If the URL has a specific job path (/job/, /position/, etc.) and is NOT
+    # a known job board listing (Indeed, LinkedIn, etc.), treat it as a form
+    # target.  The user's intent is clear: they want to apply to THIS URL.
+    if (
+        apply_route == "manual"
+        and state.get("source") == "telegram"
+        and jd_url
+        and _url_has_job_path(jd_url)
+        and not any(p.search(jd_url) for p in _JOB_LISTING_PATTERNS)
+    ):
+        reqs = state["requirements"]
+        reqs["apply_method"] = "url"
+        reqs["apply_target"] = jd_url
+        apply_route = "form"
+        logger.info(
+            "Route set to form — telegram source with job-specific URL path: %s",
+            jd_url,
+        )
+
+    # Priority 2: jd_url itself (e.g. user pasted a Greenhouse link directly)
+    if apply_route == "manual" and jd_url and _is_ats_form_url(jd_url):
+        reqs = state["requirements"]
+        reqs["apply_method"] = "url"
+        reqs["apply_target"] = jd_url
+        apply_route = "form"
+        logger.info(
+            "Route overridden to form — ATS URL detected in jd_url: %s", jd_url
+        )
+    elif apply_route == "manual" and (job_url_direct or jd_url):
+        logger.info(
+            "Route stays manual — URLs are job listings, not ATS forms. "
+            "job_url_direct='%s', jd_url='%s'",
+            job_url_direct, jd_url,
+        )
+
     state["route"] = apply_route
     logger.info("Route: %s", apply_route)
     return state
@@ -727,8 +1045,14 @@ def node_approval_gate(state: PipelineState) -> PipelineState:
         f"<b>Role:</b> {role}",
         f"<b>Score:</b> {state['match_score']:.1f}",
         f"<b>Route:</b> {state['route']}",
-        f"\n<b>Subject:</b> {state.get('email_subject', 'N/A')}",
     ]
+    # Only show email subject for email/manual routes (form routes skip email_drafter)
+    if state.get("email_subject"):
+        parts.append(f"\n<b>Subject:</b> {state['email_subject']}")
+    if state.get("route") == "form":
+        apply_target = state.get("requirements", {}).get("apply_target", "")
+        if apply_target:
+            parts.append(f"\n<b>Apply URL:</b> {apply_target}")
     if state.get("cover_letter_text"):
         # Show first 200 chars of cover letter
         preview = state["cover_letter_text"][:200]
@@ -821,6 +1145,17 @@ def node_browser_agent(state: PipelineState) -> PipelineState:
 
     reqs = state["requirements"]
     url = reqs.get("apply_target", "")
+    # Fallback: if apply_target is empty, try job_url_direct or jd_url
+    # but ONLY if the URL is not a job board listing page (LinkedIn, Indeed, etc.)
+    if not url:
+        fallback_url = (state.get("job_url_direct") or "").strip() or (state.get("jd_url") or "").strip()
+        if fallback_url:
+            _fb_is_listing = any(p.search(fallback_url) for p in _JOB_LISTING_PATTERNS)
+            if not _fb_is_listing:
+                url = fallback_url
+                logger.info("apply_target was empty, falling back to: %s", url)
+            else:
+                logger.info("apply_target was empty, fallback URL is a listing page (skipping): %s", fallback_url)
 
     if not url:
         logger.warning("No apply URL found — skipping browser agent")
@@ -874,6 +1209,17 @@ def node_gate2(state: PipelineState) -> PipelineState:
     company = reqs.get("company", "Unknown")
     role = reqs.get("role", "Unknown")
     route = state.get("route", "manual")
+
+    # Manual route: there's no recipient to send to, so Gate 2 is
+    # meaningless.  Auto-approve and let node_notify show the draft link
+    # (or manual-apply notice) without asking a confusing "Ready to Send?"
+    # that can never actually send.
+    if route == "manual":
+        logger.info(
+            "Gate 2: auto-approved (route=manual, nothing to send)"
+        )
+        state["_gate2_approval"] = "approved"
+        return state
 
     # Send the draft email preview
     parts = [
@@ -988,7 +1334,7 @@ def node_execute_send(state: PipelineState) -> PipelineState:
 @_safe_node
 def node_notify(state: PipelineState) -> PipelineState:
     """Send final Telegram notification based on route."""
-    from bot.telegram_bot import send_draft_ready, send_manual_notice, send_sent_confirmation
+    from bot.telegram_bot import send_draft_ready, send_manual_notice, send_sent_confirmation, send_form_submitted
 
     logger.info("▶ node_notify")
 
@@ -1010,16 +1356,32 @@ def node_notify(state: PipelineState) -> PipelineState:
     elif route == "form":
         form_result = state.get("form_result", {})
         form_status = form_result.get("status", "unknown")
-        if draft_url:
-            # Also created a draft as backup
-            send_draft_ready(company=company, role=role, draft_url=draft_url)
+        if form_status in ("success", "submitted"):
+            # Form was submitted successfully
+            send_form_submitted(company=company, role=role, form_url=form_result.get("url", ""))
+        else:
+            # Form failed or was incomplete — tell user to apply manually with the job URL
+            job_url = state.get("jd_url") or state.get("requirements", {}).get("apply_target", "")
+            form_notes = form_result.get("notes", "")
+            send_manual_notice(
+                company=company, role=role, draft_url=None,
+                job_url=job_url, notes=form_notes or None,
+            )
         logger.info("Form application status: %s", form_status)
     else:
-        # manual
-        send_manual_notice(company=company, role=role, draft_url=draft_url)
+        # manual — include job URL so user can click through to apply
+        job_url = state.get("jd_url") or reqs.get("apply_target", "")
+        send_manual_notice(company=company, role=role, draft_url=draft_url, job_url=job_url or None)
 
     if state.get("email_sent"):
-        _update_db_status(state, "sent")
+        _update_db_status(state, "applied")
+    elif route == "form":
+        form_result = state.get("form_result", {})
+        form_status = form_result.get("status", "unknown")
+        if form_status in ("success", "submitted"):
+            _update_db_status(state, "applied")
+        else:
+            _update_db_status(state, "awaiting_review")
     else:
         _update_db_status(state, "awaiting_review")
     return state
@@ -1151,6 +1513,14 @@ def _update_db_status(
 # Conditional edge functions
 # ---------------------------------------------------------------------------
 
+def route_after_scrape(state: PipelineState) -> str:
+    """After scrape_jd: if error is set (scrape failed), route to error node immediately."""
+    if state.get("error"):
+        logger.error("route_after_scrape — scrape failed, routing to error node")
+        return "error"
+    return "parse_jd"
+
+
 def route_after_threshold(state: PipelineState) -> str:
     """After threshold gate: proceed or reject."""
     score_val = state["match_score"]
@@ -1198,7 +1568,7 @@ def route_after_threshold(state: PipelineState) -> str:
 
 
 def route_after_resume(state: PipelineState) -> str:
-    """After resume_tailor: error if failed, cover_letter if required, else email_drafter."""
+    """After resume_tailor: error if failed, cover_letter if required, else apply_router."""
     # If resume_tailor failed, halt the pipeline — downstream nodes need resume_pdf_path
     if state.get("error"):
         logger.error("route_after_resume — resume_tailor failed, routing to error node")
@@ -1206,7 +1576,7 @@ def route_after_resume(state: PipelineState) -> str:
     reqs = state.get("requirements", {})
     if reqs.get("cover_letter_required", False):
         return "cover_letter"
-    return "email_drafter"
+    return "apply_router"
 
 
 def route_after_approval(state: PipelineState) -> str:
@@ -1226,6 +1596,14 @@ def route_after_approval(state: PipelineState) -> str:
     state["_rejection_reason"] = state.get("_rejection_reason") or "user_rejected"
     return "rejected"
 
+
+
+def route_after_apply_router(state: PipelineState) -> str:
+    """After apply_router: form routes skip email_drafter, others need it."""
+    route = state.get("route", "manual")
+    if route == "form":
+        return "approval_gate"  # skip email_drafter for form applications
+    return "email_drafter"  # email and manual routes need an email draft
 
 
 def route_after_apply(state: PipelineState) -> str:
@@ -1248,10 +1626,10 @@ def route_after_gate2(state: PipelineState) -> str:
 
 
 def route_after_cover_letter(state: PipelineState) -> str:
-    """After cover_letter: compile PDF if text exists, else go to email_drafter."""
+    """After cover_letter: compile PDF if text exists, else go to apply_router."""
     if state.get("cover_letter_text"):
         return "compile_cover_letter_pdf"
-    return "email_drafter"
+    return "apply_router"
 
 
 # ---------------------------------------------------------------------------
@@ -1287,7 +1665,11 @@ def build_graph() -> StateGraph:
     graph.set_entry_point("scrape_jd")
 
     # --- Linear edges ---
-    graph.add_edge("scrape_jd", "parse_jd")
+    graph.add_conditional_edges(
+        "scrape_jd",
+        route_after_scrape,
+        {"parse_jd": "parse_jd", "error": "error"},
+    )
     graph.add_edge("parse_jd", "cv_rag")
     graph.add_edge("cv_rag", "match_scorer")
     graph.add_edge("match_scorer", "threshold_gate")
@@ -1302,33 +1684,40 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # --- Conditional 2: resume → cover letter or email_drafter ---
+    # --- Conditional 2: resume → cover letter or apply_router ---
     graph.add_conditional_edges(
         "resume_tailor",
         route_after_resume,
         {
             "cover_letter": "cover_letter",
-            "email_drafter": "email_drafter",
+            "apply_router": "apply_router",
             "error": "error",
         },
     )
 
-    # --- Conditional 3 (new): cover_letter → compile PDF or email_drafter ---
+    # --- Conditional 3: cover_letter → compile PDF or apply_router ---
     graph.add_conditional_edges(
         "cover_letter",
         route_after_cover_letter,
         {
             "compile_cover_letter_pdf": "compile_cover_letter_pdf",
-            "email_drafter": "email_drafter",
+            "apply_router": "apply_router",
         },
     )
 
-    # --- compile_cover_letter_pdf → email_drafter ---
-    graph.add_edge("compile_cover_letter_pdf", "email_drafter")
+    # --- compile_cover_letter_pdf → apply_router ---
+    graph.add_edge("compile_cover_letter_pdf", "apply_router")
 
-    # --- email_drafter → apply_router → approval_gate ---
-    graph.add_edge("email_drafter", "apply_router")
-    graph.add_edge("apply_router", "approval_gate")
+    # --- apply_router → conditional: form skips email_drafter ---
+    graph.add_conditional_edges(
+        "apply_router",
+        route_after_apply_router,
+        {
+            "approval_gate": "approval_gate",  # form route — skip email
+            "email_drafter": "email_drafter",   # email/manual — need email draft
+        },
+    )
+    graph.add_edge("email_drafter", "approval_gate")
 
     # --- Conditional 4: Gate 1 (approve / regenerate / cancel) ---
     graph.add_conditional_edges(
@@ -1345,8 +1734,8 @@ def build_graph() -> StateGraph:
     # --- After gmail_draft → gate2 ---
     graph.add_edge("gmail_draft", "gate2")
 
-    # --- After browser_agent → gmail_draft (backup draft, then gate2) ---
-    graph.add_edge("browser_agent", "gmail_draft")
+    # --- After browser_agent → notify (no Gmail draft for form applications) ---
+    graph.add_edge("browser_agent", "notify")
 
     # --- Conditional 6: Gate 2 (send / cancel) ---
     graph.add_conditional_edges(
@@ -1387,6 +1776,7 @@ _compiled_pipeline = compile_graph()
 def run_pipeline(
     jd_text: str = "",
     jd_url: str | None = None,
+    job_url_direct: str | None = None,
     application_id: str | None = None,
     source: str = "cli",
 ) -> PipelineState:
@@ -1402,6 +1792,7 @@ def run_pipeline(
     initial_state: PipelineState = {
         "jd_text": jd_text,
         "jd_url": jd_url,
+        "job_url_direct": job_url_direct,
         "application_id": application_id,
         "error": None,
         "source": source,
@@ -1464,6 +1855,10 @@ def _scrape_jd(url: str) -> str:
         sys.exit(1)
 
     text = _html_to_text(html_text)
+
+    if len(text.strip()) < 50:
+        logger.warning("urllib scraped only %d chars — trying Playwright (JS render)", len(text))
+        text = _scrape_with_playwright(url)
 
     if not text.strip():
         logger.error("No text extracted from URL")

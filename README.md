@@ -34,9 +34,9 @@ CouchHire is a fully agentic job application pipeline. Paste a job description, 
 2. The JD Parser extracts structured requirements: skills, apply method, cover letter needed, subject line format.
 3. The CV RAG agent retrieves the most relevant sections of your master CV from ChromaDB.
 4. The Match Scorer computes a fit percentage using sentence-transformers. If below the configured threshold, the job is skipped or flagged.
-5. If the match passes, three agents run in parallel: Resume Tailor (compiles a tailored PDF via pdflatex), Cover Letter (if required), and Email Drafter.
+5. If the match passes, three agents run sequentially: Resume Tailor (compiles a tailored PDF via pdflatex), Cover Letter (if required — receives resume_content to complement, not repeat), and Email Drafter (references specific projects from the tailored resume).
 6. A Telegram notification arrives with a summary card — company, role, match %, apply route — and Approve / Edit buttons.
-7. On approval, the Apply Router detects the method: Gmail MCP for email drafts, semi-autonomous browser agent for ATS forms (with LLM-assisted field mapping and human-in-the-loop interrupts), or a manual-apply alert.
+7. On approval, the Apply Router detects the method: Gmail MCP for email drafts, semi-autonomous browser agent for ATS forms (with smart URL detection for 16+ ATS platforms, LLM-assisted field mapping, dropdown/radio handling, and human-in-the-loop interrupts via Telegram), or a manual-apply alert with links to the draft and job posting.
 8. The application is logged in Supabase. You later tap an outcome button in Telegram (No Reply / Screening / Interview / Rejected / Offer).
 9. Every 10 new outcome labels, the match scorer automatically retrains on your personal history.
 
@@ -100,7 +100,8 @@ couchhire/
 │   │   ├── master_cv.*       # .tex, .pdf, or .docx — any format accepted
 │   │   ├── resume_template.tex       # Optional custom LaTeX template
 │   │   ├── cover_letter_template.tex # Optional custom cover letter template
-│   │   └── instructions.md  # Optional tailoring preferences
+│   │   ├── instructions.md  # Optional tailoring preferences
+│   │   └── form_answers.json # Persistent answer memory for ATS forms (auto-created, compounds over time)
 │   ├── chroma_store/         # ChromaDB embeddings — gitignored
 │   ├── output/               # Compiled PDFs + .tex intermediates — gitignored
 │   ├── embed_cv.py           # Orchestrates parse → embed pipeline
@@ -185,6 +186,11 @@ This section is intentionally precise so that each module has a clear contract. 
 ### `agents/apply_router.py`
 - **Input:** `requirements["apply_method"]`, `requirements["apply_target"]`
 - **Output:** `route` (str): `"email"` | `"form"` | `"manual"`
+- **Smart URL resolution in pipeline:** After basic routing, `pipeline.py` applies additional heuristics:
+  - Detects ATS form URLs via pattern matching (Greenhouse, Workday, Lever, Ashby, Jobvite, iCIMS, SmartRecruiters, BambooHR, JazzHR, Rippling, Recruitee, Breezy, Pinpoint, Teamtailor, Personio, Zoho Recruit)
+  - Detects job listing pages (Indeed, LinkedIn, Glassdoor, Google Jobs) to prevent form-fill on non-form pages
+  - Overrides generic careers page URLs with specific JD URLs
+  - For `/search`-originated applications, uses `job_url_direct` from JobSpy
 - **No LLM call** — deterministic routing logic only
 
 ### `apply/gmail_sender.py`
@@ -197,11 +203,22 @@ This section is intentionally precise so that each module has a clear contract. 
 ### `apply/browser_agent.py`
 - **Input:** `apply_target` (URL), all generated documents (resume PDF, cover letter, applicant data)
 - **Action:** Semi-autonomous ATS form filler with LLM-assisted field mapping
+- **Auto-navigation:** Detects and clicks "Apply Now" buttons, dismisses cookie banners and chatbot widgets, handles LinkedIn autofill prompts
+- **Resume upload:** Automatically uploads resume PDF via file input detection, waits for auto-population of form fields
+- **Smart field handling:**
+  - `<select>` dropdowns: extracts all options, shows them to user in Telegram with bullet-point list, uses `select_option()` (not `fill()`)
+  - `<input>` text fields: fills directly with applicant data or asks user via Telegram
+  - Radio buttons: finds matching radio by label text and clicks the correct one
+  - Checkboxes: clicks to toggle
+- **Fuzzy option matching:** When user's response doesn't exactly match a dropdown option, uses difflib to find the closest match (≥60% similarity)
+- **EEO field auto-selection:** Safely auto-selects "Decline to self-identify" / "Prefer not to say" for demographic fields (gender, veteran status, disability) — only for fields matching EEO patterns
 - For each form page: extracts visible text + field labels → sends to LLM → gets field mapping → fills fields
 - **On any blocker** (missing field, validation error, CAPTCHA, unknown UI):
-  - Takes screenshot → sends to Telegram with context
+  - Takes screenshot → sends to Telegram with the actual field label and context (not opaque field IDs)
   - **Simple blockers:** user replies with text → agent fills and continues (answer stored in `form_answers.json` for future reuse)
   - **Complex blockers:** user takes over browser via CDP (`chrome://inspect` → `localhost:9222`), taps `[Done]` → agent resumes
+  - **Click/radio failures:** takes screenshot, sends manual takeover message with specific instructions ("Please select X manually, reply `done`")
+- **Loop prevention:** Tracks asked fields to avoid re-prompting on retry cycles; content hash detection forces "Next" click after 3 identical page scans; escalates to manual takeover after 5 stuck iterations
 - Uses `threading.Event()` for pause/resume — no Redis or external state store
 - **No LLM call for form filling logic** — LLM is used only for field mapping (via `llm/client.py`)
 
@@ -214,10 +231,12 @@ This section is intentionally precise so that each module has a clear contract. 
 - Does NOT depend on Telegram bot — pure browser lifecycle management
 
 ### `bot/telegram_bot.py`
-- **Outbound messages:** new job card, manual takeover alert, send confirmation, daily digest
+- **Outbound messages:** new job card, manual takeover alert, send confirmation, form submission confirmation, manual-apply notice with draft/job links, daily digest
 - **Inbound buttons:** Approve, Edit, Done (takeover), No Reply, Screening, Interview, Rejected, Offer
 - **On Edit:** re-triggers generator agents; on Approve: triggers apply route
 - **On outcome label:** writes status to Supabase, checks if retrain threshold is hit
+- **`send_form_submitted()`:** notifies user when ATS form is successfully submitted (company, role, URL)
+- **`send_manual_notice()`:** notifies user to apply manually when no automated route works, with links to the Gmail draft and/or job posting
 
 ### `db/supabase_client.py`
 - Thin wrapper around `supabase-py`
@@ -238,6 +257,11 @@ This section is intentionally precise so that each module has a clear contract. 
 - **Strips `<think>...</think>` blocks globally** from all LLM responses — handles reasoning models (Qwen3, DeepSeek-R1) that leak internal thinking tokens. No agent needs to handle this individually
 - All agents call this — never call LiteLLM directly from an agent
 
+### `agents/llm_selector.py` (internal helper)
+- LLM-driven content selection for resume tailoring — picks which projects, skills, certs, leadership items to include
+- **Truncated JSON recovery:** `_repair_truncated_json()` handles cases where LLM hits `max_tokens` and returns incomplete JSON — repairs by closing open brackets/braces
+- Enforces user instructions (role-conditional includes/excludes from `instructions.md`)
+
 ### `config.py`
 - Loads `.env` via `python-dotenv`
 - **Validates all required keys on import** — raises a clear error listing every missing variable before anything else runs
@@ -254,6 +278,13 @@ Input (JobSpy search / python pipeline.py --jd "..." / URL)
 jd_parser.py
   → extracts: company, role, skills, apply_method, apply_target,
     cover_letter_required, subject_line_format, github_requested
+        │
+        ▼
+apply_router.py (smart URL resolution)
+  → detects ATS form URLs (Greenhouse, Workday, Lever, Ashby, Jobvite, etc.)
+  → detects job listing pages (Indeed, LinkedIn, Glassdoor) vs. actual application forms
+  → overrides generic careers pages with specific JD URLs when available
+  → uses job_url_direct from JobSpy for /search-originated applications
         │
         ▼
 cv_rag.py  +  match_scorer.py
@@ -440,7 +471,7 @@ CouchHire uses [`google_workspace_mcp`](https://github.com/taylorwilsdon/google_
 ---
 
 ### Job Search (JobSpy)
-No API keys required! JobSpy scrapes job boards directly.
+No API keys required! JobSpy scrapes job boards directly. Each site is scraped individually so that a failure on one board (e.g. Google blocking) doesn't discard results from the others. Results are deduplicated by URL across boards.
 
 Optional configuration in `.env`:
 - `JOBSPY_SITES` — Which boards to search (default: `indeed,linkedin,google`)
@@ -762,6 +793,8 @@ Available at http://localhost:8501 once running.
 - [x] Telegram bot (notifications + approval buttons + /outcome command + /search + /apply + gate handlers + auto-retrain hook)
 - [x] Gmail MCP integration (draft_gmail_message + send_gmail_message via google_workspace_mcp over Streamable HTTP)
 - [x] Semi-autonomous browser agent (LLM-assisted ATS form filling + human-in-the-loop)
+- [x] Browser agent hardening (smart `<select>`/radio/checkbox handling, fuzzy option matching, EEO auto-selection, cookie/chatbot dismissal, loop prevention, resume auto-upload)
+- [x] ATS URL pattern detection (Greenhouse, Workday, Lever, Ashby, Jobvite, iCIMS + 10 more)
 - [x] CDP session management for browser takeover
 - [x] Supabase logging
 - [x] NLP match scorer + self-improving retraining loop (CosineSimilarityLoss, outcome labels, class balancing)
