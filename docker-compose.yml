@@ -1,0 +1,81 @@
+# =============================================================================
+# CouchHire — docker-compose.yml
+# Start everything: docker compose up --build
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # app — Main CouchHire container (pipeline + telegram bot + agents)
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: couchhire-app
+    env_file: .env
+    environment:
+      - BROWSER_HEADLESS=true
+      - GMAIL_MCP_URL=http://gmail-mcp:8000/mcp
+    volumes:
+      - ./cv/uploads:/app/cv/uploads
+      - ./cv/output:/app/cv/output
+      - ./nlp/models:/app/nlp/models
+      - ./db:/app/db
+      - browser-profile:/root/.couchhire/browser_profile
+    depends_on:
+      gmail-mcp:
+        condition: service_started
+    # Default: run telegram bot (long-running). Override for one-off pipeline runs:
+    #   docker compose run app python pipeline.py --jd "..."
+    command: ["python", "bot/telegram_bot.py"]
+    restart: unless-stopped
+    networks:
+      - couchhire
+
+  # ---------------------------------------------------------------------------
+  # dashboard — Streamlit UI
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: couchhire-dashboard
+    env_file: .env
+    environment:
+      - BROWSER_HEADLESS=true
+      - GMAIL_MCP_URL=http://gmail-mcp:8000/mcp
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./cv/uploads:/app/cv/uploads
+      - ./cv/output:/app/cv/output
+      - ./nlp/models:/app/nlp/models
+      - ./db:/app/db
+    depends_on:
+      gmail-mcp:
+        condition: service_started
+    command: ["streamlit", "run", "dashboard/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+    restart: unless-stopped
+    networks:
+      - couchhire
+
+  # ---------------------------------------------------------------------------
+  # gmail-mcp — Gmail MCP server (Streamable HTTP transport)
+  # ---------------------------------------------------------------------------
+  gmail-mcp:
+    image: ghcr.io/taylorwilsdon/google_workspace_mcp:latest
+    container_name: couchhire-gmail-mcp
+    ports:
+      - "8000:8000"
+    env_file: .env
+    restart: unless-stopped
+    networks:
+      - couchhire
+
+volumes:
+  browser-profile:
+    driver: local
+
+networks:
+  couchhire:
+    driver: bridge

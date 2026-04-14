@@ -1,0 +1,53 @@
+# =============================================================================
+# CouchHire — .dockerignore
+# =============================================================================
+
+# Secrets — NEVER include in image
+.env
+.env.*
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Virtual environments
+venv/
+test_env/
+.venv/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ChromaDB store — rebuilt at runtime from CV
+cv/chroma_store/
+
+# Generated output — mounted as volume
+cv/output/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Docs / plans
+*.md
+!cv/defaults/instructions.md
+LICENSE
