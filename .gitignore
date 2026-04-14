@@ -40,3 +40,6 @@ MEMORY.md
 
 # Fine-tuned NLP models — user-specific, never commit
 nlp/models/
+
+# supabase cache
+supabase/.temp/
