@@ -6,7 +6,7 @@ for skill content (not just a fallback).
 import sys
 import re
 
-sys.path.insert(0, "/Users/satishpremanand/Documents/GitHub/CouchHire")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 
 from agents.resume_assembler import reformat_skill_to_template_style
 
