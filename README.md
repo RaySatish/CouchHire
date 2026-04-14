@@ -36,7 +36,7 @@ CouchHire is a fully agentic job application pipeline. Paste a job description, 
 4. The Match Scorer computes a fit percentage using sentence-transformers. If below the configured threshold, the job is skipped or flagged.
 5. If the match passes, three agents run sequentially: Resume Tailor (compiles a tailored PDF via pdflatex), Cover Letter (if required — receives resume_content to complement, not repeat), and Email Drafter (references specific projects from the tailored resume).
 6. A Telegram notification arrives with a summary card — company, role, match %, apply route — and Approve / Edit buttons.
-7. On approval, the Apply Router detects the method: Gmail MCP for email drafts, semi-autonomous browser agent for ATS forms (with smart URL detection for 16+ ATS platforms, LLM-assisted field mapping, dropdown/radio handling, and human-in-the-loop interrupts via Telegram), or a manual-apply alert with links to the draft and job posting.
+7. On approval, the Apply Router detects the method: Gmail MCP for email drafts, semi-autonomous browser agent for ATS forms (with smart URL detection for 20+ ATS/form platforms including Google Forms, LLM-assisted field mapping, dropdown/radio handling, and human-in-the-loop interrupts via Telegram), or a manual-apply alert with links to the draft and job posting.
 8. The application is logged in Supabase. You later tap an outcome button in Telegram (No Reply / Screening / Interview / Rejected / Offer).
 9. Every 10 new outcome labels, the match scorer automatically retrains on your personal history.
 
@@ -76,9 +76,9 @@ couchhire/
 │   ├── email_drafter.py      # Email draft generation (receives resume_content for project-specific context) → subject + body strings
 │   └── apply_router.py       # Detects email / form / manual route → route string
 ├── apply/            # Gmail draft creator (MCP client), Playwright browser agent, session handoff
-│   ├── gmail_sender.py       # MCP client: create_draft() + send_draft() via draft_gmail_message / send_gmail_message tools (google_workspace_mcp)
+│   ├── gmail_sender.py       # MCP client: create_draft() + send_email() via draft_gmail_message / send_gmail_message tools; fetches user-edited drafts before sending
 │   ├── browser_agent.py      # Semi-autonomous ATS form filler (LLM field mapping + blocker detection + Telegram interrupts)
-│   └── session_handoff.py    # CDP session manager (launches Chromium with --remote-debugging-port for Playwright + manual takeover)
+│   └── session_handoff.py    # CDP session manager (persistent browser profile, launches Chromium with --remote-debugging-port for Playwright + manual takeover)
 ├── bot/              # Telegram bot
 │   └── telegram_bot.py       # Notifications, /outcome, /search, /apply, gate handlers
 ├── jobs/             # JobSpy job search + CV-based filtering
@@ -187,22 +187,27 @@ This section is intentionally precise so that each module has a clear contract. 
 - **Input:** `requirements["apply_method"]`, `requirements["apply_target"]`
 - **Output:** `route` (str): `"email"` | `"form"` | `"manual"`
 - **Smart URL resolution in pipeline:** After basic routing, `pipeline.py` applies additional heuristics:
-  - Detects ATS form URLs via pattern matching (Greenhouse, Workday, Lever, Ashby, Jobvite, iCIMS, SmartRecruiters, BambooHR, JazzHR, Rippling, Recruitee, Breezy, Pinpoint, Teamtailor, Personio, Zoho Recruit)
-  - Detects job listing pages (Indeed, LinkedIn, Glassdoor, Google Jobs) to prevent form-fill on non-form pages
+  - Detects ATS form URLs via pattern matching (Greenhouse, Workday, Lever, Ashby, Jobvite, iCIMS, SmartRecruiters, BambooHR, JazzHR, Rippling, Recruitee, Breezy, Pinpoint, Teamtailor, Personio, Zoho Recruit, Google Forms, Typeform, Airtable, JotForm, Tally, Fillout)
+  - Detects job listing pages (Indeed, LinkedIn, Glassdoor, ZipRecruiter, Naukri, Monster, Google Jobs) to prevent form-fill on non-form pages
+  - Normalises `/apply` form URLs back to scrapeable JD page URLs for text extraction
+  - Falls back to Playwright (headless Chromium) for JS-rendered pages when urllib returns insufficient content
   - Overrides generic careers page URLs with specific JD URLs
   - For `/search`-originated applications, uses `job_url_direct` from JobSpy
+  - 5-priority URL routing: (1) search + `job_url_direct`, (2) search + `jd_url`, (3) non-search `job_url_direct`, (4) telegram + job-specific path, (5) `jd_url` as ATS form
 - **No LLM call** — deterministic routing logic only
 
 ### `apply/gmail_sender.py`
 - **Input:** `email_subject`, `email_body`, `resume_pdf_path`, `apply_target`, optional `cover_letter_pdf_path`, `user_google_email` (from `APPLICANT_EMAIL` in config)
 - **`create_draft()`:** calls `draft_gmail_message` tool on the Gmail MCP server (`google_workspace_mcp`) with resume PDF (and cover letter PDF if present) attached — returns `(draft_url, draft_id)`
-- **`send_email()`:** calls `send_gmail_message` tool on the MCP server — returns the message ID (str) for constructing the sent URL. Only called after Gate 2 approval
+- **`send_email()`:** before sending, fetches the current draft from Gmail to pick up any user edits (subject, body, recipients), strips attachment metadata from the body, then calls `send_gmail_message` tool on the MCP server — returns the message ID (str) for constructing the sent URL. Only called after Gate 2 approval
 - **Draft-only by default** — the pipeline creates a draft, user reviews in Gmail, Gate 2 approval triggers send
+- **Draft edit detection** — before sending, fetches the current draft from Gmail to pick up any user edits (subject, body, recipients); strips attachment metadata from the body
 - **No LLM call**
 
 ### `apply/browser_agent.py`
 - **Input:** `apply_target` (URL), all generated documents (resume PDF, cover letter, applicant data)
 - **Action:** Semi-autonomous ATS form filler with LLM-assisted field mapping
+- **Google Forms support:** Detects Google Forms via hostname/selectors, extracts question text from ARIA-based custom widgets (`role="radiogroup"`, `role="listbox"`, `role="checkbox"`), handles `gf_radio`, `gf_checkbox`, `gf_dropdown` field types
 - **Auto-navigation:** Detects and clicks "Apply Now" buttons, dismisses cookie banners and chatbot widgets, handles LinkedIn autofill prompts
 - **Resume upload:** Automatically uploads resume PDF via file input detection, waits for auto-population of form fields
 - **Smart field handling:**
@@ -223,15 +228,17 @@ This section is intentionally precise so that each module has a clear contract. 
 - **No LLM call for form filling logic** — LLM is used only for field mapping (via `llm/client.py`)
 
 ### `apply/session_handoff.py`
-- **Action:** CDP session manager — launches Chromium with `--remote-debugging-port=9222`
-- `launch_browser(session_id)` — starts Chromium with CDP enabled
+- **Action:** CDP session manager — launches Chromium with `--remote-debugging-port=9222` using persistent `BROWSER_PROFILE_DIR`
+- `launch_browser(session_id)` — starts Chromium with CDP enabled, uses persistent profile so cookies/sessions survive across runs
 - `get_cdp_url()` — returns the CDP WebSocket URL for Playwright's `connect_over_cdp()`
 - `get_takeover_instructions()` — returns human-readable instructions for user to connect via `chrome://inspect`
-- `close_browser()` — cleanup
+- `setup_browser_profile()` — CLI tool (`python -m apply.session_handoff --setup`): launches visible browser for signing into Google/LinkedIn
+- `close_browser()` — cleanup (profile directory preserved)
 - Does NOT depend on Telegram bot — pure browser lifecycle management
 
 ### `bot/telegram_bot.py`
 - **Outbound messages:** new job card, manual takeover alert, send confirmation, form submission confirmation, manual-apply notice with draft/job links, daily digest
+- **`/apply` command:** Supports 4 input modes — URL-only, JD+URL, JD+email, JD-only
 - **Inbound buttons:** Approve, Edit, Done (takeover), No Reply, Screening, Interview, Rejected, Offer
 - **On Edit:** re-triggers generator agents; on Approve: triggers apply route
 - **On outcome label:** writes status to Supabase, checks if retrain threshold is hit
@@ -239,8 +246,9 @@ This section is intentionally precise so that each module has a clear contract. 
 - **`send_manual_notice()`:** notifies user to apply manually when no automated route works, with links to the Gmail draft and/or job posting
 
 ### `db/supabase_client.py`
-- Thin wrapper around `supabase-py`
+- Thin wrapper around `supabase-py` with httpx timeout (3s connect, 5s read) via `ClientOptions`
 - Exposes: `insert_application()`, `update_status()`, `get_all_applications()`, `get_labeled_outcomes()`
+- Pipeline pre-creates the DB row in a daemon thread with `join(timeout=5.0)` so slow DB calls never block the pipeline
 
 ### `nlp/retrain.py`
 - **Trigger:** called automatically (via background thread in Telegram bot) when `should_retrain()` returns True — every `RETRAIN_EVERY` new outcome labels once `MIN_RETRAIN_LABELS` threshold is met
@@ -559,6 +567,7 @@ APPLICANT_LINKEDIN=https://linkedin.com/in/your-profile
 FORM_ANSWERS_PATH=cv/uploads/form_answers.json  # default, override if needed
 CDP_PORT=9222                     # Chrome DevTools Protocol port, default 9222
 BROWSER_HEADLESS=false            # run browser agent headless (default false)
+BROWSER_PROFILE_DIR=~/.couchhire/browser_profile/  # persistent Chromium profile (cookies/sessions survive)
 ```
 
 **Output directory (optional):**
@@ -794,7 +803,10 @@ Available at http://localhost:8501 once running.
 - [x] Gmail MCP integration (draft_gmail_message + send_gmail_message via google_workspace_mcp over Streamable HTTP)
 - [x] Semi-autonomous browser agent (LLM-assisted ATS form filling + human-in-the-loop)
 - [x] Browser agent hardening (smart `<select>`/radio/checkbox handling, fuzzy option matching, EEO auto-selection, cookie/chatbot dismissal, loop prevention, resume auto-upload)
-- [x] ATS URL pattern detection (Greenhouse, Workday, Lever, Ashby, Jobvite, iCIMS + 10 more)
+- [x] Google Forms support (ARIA-based custom widget detection, question label extraction, `gf_radio`/`gf_checkbox`/`gf_dropdown` handling)
+- [x] Draft edit detection (fetches user-edited draft from Gmail before sending, strips attachment metadata from body)
+- [x] Persistent browser profile (cookies/sessions survive across runs, `setup_browser_profile` CLI for one-time login)
+- [x] ATS URL pattern detection (Greenhouse, Workday, Lever, Ashby, Jobvite, iCIMS, Google Forms, Typeform, Airtable, JotForm, Tally, Fillout + more)
 - [x] CDP session management for browser takeover
 - [x] Supabase logging
 - [x] NLP match scorer + self-improving retraining loop (CosineSimilarityLoss, outcome labels, class balancing)
