@@ -1,0 +1,43 @@
+Role: Data Scientist — Financial Analytics
+
+Company: RiskLens India
+
+Location: Chennai, India (Remote-first)
+
+About the Role:
+RiskLens India provides advanced analytics solutions to banks, NBFCs, and insurance companies across South and Southeast Asia. We're hiring a Data Scientist to join our Financial Risk Modelling team. You'll build predictive models for credit risk, fraud detection, and portfolio analytics — combining classical statistics with modern ML to deliver actionable insights that drive lending decisions worth crores.
+
+Responsibilities:
+- Develop credit scoring and loan default prediction models using supervised ML techniques
+- Build fraud detection systems using anomaly detection, graph-based methods, and ensemble classifiers
+- Perform exploratory data analysis (EDA) on large-scale financial datasets to identify patterns and risk signals
+- Implement feature engineering pipelines for structured financial data (transaction logs, credit bureau data, KYC)
+- Conduct rigorous model validation: cross-validation, ROC/AUC analysis, calibration, and fairness auditing
+- Apply statistical methods for hypothesis testing, causal inference, and significance analysis
+- Build time series models for financial forecasting (revenue, delinquency rates, market indicators)
+- Handle class imbalance using SMOTE, cost-sensitive learning, and threshold optimization
+- Create interactive dashboards and reports for business stakeholders using Streamlit or Plotly
+- Document model methodology, assumptions, and limitations for regulatory compliance
+
+Requirements:
+- M.Sc./B.Tech in Statistics, Mathematics, Data Science, or related quantitative field
+- Strong foundation in statistics: probability theory, hypothesis testing, regression analysis, Bayesian methods
+- Proficiency in Python (Scikit-learn, Pandas, NumPy, statsmodels, SciPy)
+- Experience with classification models: logistic regression, random forests, gradient boosting (XGBoost, LightGBM)
+- Hands-on experience with EDA, feature engineering, and data preprocessing
+- Understanding of model evaluation metrics and cross-validation strategies
+- Familiarity with SQL and data querying
+- Experience with data visualization (Matplotlib, Seaborn, Plotly, Streamlit)
+- Knowledge of time series analysis fundamentals
+- Good communication skills — ability to explain technical results to non-technical stakeholders
+
+Nice to Have:
+- Domain knowledge in financial services: credit risk, lending, or insurance
+- Experience with deep learning for tabular data (neural networks, embeddings)
+- Knowledge of NLP for document processing (loan applications, financial reports)
+- Experience with big data tools (Spark, Hadoop)
+- Familiarity with cloud platforms (AWS, GCP)
+- Published research in statistics, econometrics, or applied ML
+- Competitive programming or mathematical olympiad background
+
+Apply: Send your resume to ds-hiring@risklens.in with subject "Data Scientist — [Your Name]"

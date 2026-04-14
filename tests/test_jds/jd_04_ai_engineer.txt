@@ -1,0 +1,45 @@
+Role: AI Engineer — LLM & Agentic Systems
+
+Company: NeuralPath Labs
+
+Location: Hyderabad, India (Hybrid — 3 days in office)
+
+About the Role:
+NeuralPath Labs builds enterprise AI agents that automate complex business workflows — from document processing to customer support to internal knowledge management. We're looking for an AI Engineer who lives and breathes LLMs, RAG, and agentic architectures. You'll design multi-agent systems that reason, plan, and execute tasks autonomously while maintaining human oversight.
+
+Responsibilities:
+- Design and implement multi-agent AI systems using LangChain, LangGraph, or CrewAI
+- Build production RAG pipelines: document parsing, chunking strategies, embedding models, vector stores (ChromaDB, Pinecone, Weaviate)
+- Implement agentic workflows with tool use, planning, memory, and self-correction
+- Develop prompt engineering strategies and evaluate LLM outputs systematically
+- Integrate LLM applications with external APIs, databases, and enterprise systems
+- Build evaluation frameworks for RAG quality (faithfulness, relevance, completeness)
+- Implement guardrails, content filtering, and safety mechanisms for production AI systems
+- Optimize LLM inference costs through model selection, caching, and routing strategies
+- Deploy AI applications using FastAPI with proper async handling, logging, and error recovery
+- Collaborate with product teams to translate business requirements into agent architectures
+
+Requirements:
+- B.Tech/M.Sc. in Computer Science, AI/ML, Statistics, or related field
+- Strong Python development skills — clean, tested, production-quality code
+- Hands-on experience building RAG systems with vector databases (ChromaDB, FAISS, Pinecone)
+- Experience with LLM frameworks: LangChain, LangGraph, or similar orchestration tools
+- Understanding of embedding models and semantic search (Sentence-Transformers, OpenAI embeddings)
+- Experience with LLM APIs (OpenAI, Anthropic, Groq, Gemini) and multi-provider routing
+- Familiarity with web frameworks (FastAPI, Flask) and REST API design
+- Experience with PostgreSQL or Supabase for application data
+- Git, Linux, Docker basics
+- Strong debugging skills and ability to work with non-deterministic systems
+
+Nice to Have:
+- Experience building AI agents that interact with real-world systems (email, browser, forms)
+- Knowledge of MCP (Model Context Protocol) for tool integration
+- Experience with Playwright or Selenium for browser automation
+- Familiarity with Telegram/Slack bot development
+- Experience with NLP (NER, text classification, sentiment analysis using spaCy or Hugging Face)
+- Published work or open-source contributions in AI/LLM space
+- Experience with Streamlit for rapid prototyping
+
+Apply: Email your resume and a link to your most interesting AI project to hiring@neuralpath.ai with subject "AI Engineer — [Your Name]"
+
+Note: Please include a cover letter explaining which agentic AI problem excites you most and how you'd approach building a solution.

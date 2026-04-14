@@ -1,0 +1,42 @@
+Role: Quantitative Analyst — Junior / Associate
+
+Company: Apex Capital Partners
+
+Location: Mumbai, India (On-site)
+
+About the Role:
+Apex Capital Partners is a systematic trading firm managing $2.4B across Indian and Asian equity markets. We are hiring a junior Quantitative Analyst to join our alpha research team. You will develop statistical models for equity price prediction, portfolio construction, and risk management. We value candidates who combine strong mathematical foundations with practical programming skills and genuine market intuition.
+
+Responsibilities:
+- Research and develop quantitative trading signals using statistical and machine learning methods
+- Build and backtest systematic trading strategies on historical market data (equities, derivatives)
+- Implement portfolio optimization models (mean-variance, risk parity, Black-Litterman)
+- Analyze market microstructure data: order book dynamics, trade flow, and execution quality
+- Develop time series forecasting models for price direction, volatility, and regime detection
+- Build data pipelines to ingest and clean tick-level and daily market data from exchanges and vendors
+- Conduct rigorous statistical validation: walk-forward testing, Monte Carlo simulation, significance testing
+- Collaborate with execution engineers to minimize slippage and market impact
+- Monitor live strategy performance and debug anomalies in real-time PnL attribution
+
+Requirements:
+- M.Sc./B.Tech in Statistics, Mathematics, Physics, Computer Science, or Quantitative Finance (2025-2027 graduates welcome)
+- Strong mathematical foundation: probability theory, statistical inference, linear algebra, optimization
+- Proficiency in Python for quantitative analysis (NumPy, Pandas, SciPy, statsmodels)
+- Experience with time series analysis and forecasting (ARIMA, GARCH, LSTM, state-space models)
+- Understanding of portfolio theory: Markowitz optimization, Sharpe ratio, risk modelling
+- Familiarity with financial markets — equities, derivatives, or crypto trading experience is a strong plus
+- Experience with data visualization (Matplotlib, Plotly, Streamlit)
+- Knowledge of SQL and data management
+- Strong problem-solving skills — competitive math/programming background preferred
+
+Nice to Have:
+- Personal trading experience (equities, options, or crypto)
+- Experience with NLP for financial text analysis (FinBERT, sentiment analysis)
+- Knowledge of Apache Spark or distributed computing for large-scale backtesting
+- Published research in quantitative finance, econometrics, or statistical learning
+- Experience with AWS or cloud-based data infrastructure
+- Familiarity with real-time streaming systems (Kafka, WebSockets)
+
+Apply: Email your resume, a brief note on your trading/research philosophy, and any relevant project links to quant-hiring@apexcapital.in with subject "Quant Analyst — [Your Name]"
+
+Note: A cover letter is required. Please describe a quantitative insight or trading idea you've explored, and what you learned from it.

@@ -1,0 +1,42 @@
+Role: Data Engineer
+
+Company: DataForge Analytics
+
+Location: Remote (India)
+
+About the Role:
+DataForge Analytics processes 50TB+ of event data daily for Fortune 500 clients across fintech, e-commerce, and adtech. We're looking for a Data Engineer to build and maintain our distributed data infrastructure. You'll work with streaming pipelines, data lakes, and batch processing systems that power real-time analytics dashboards and ML model training workflows.
+
+Responsibilities:
+- Design, build, and maintain scalable ETL/ELT pipelines using Apache Spark, Kafka, and Airflow
+- Architect and manage data lake infrastructure on AWS (S3, EMR, Glue, Athena, Redshift)
+- Build real-time streaming pipelines for event ingestion and processing using Kafka and Spark Structured Streaming
+- Implement data quality frameworks: schema validation, anomaly detection, data lineage tracking
+- Optimize Spark jobs for performance: partitioning strategies, broadcast joins, shuffle tuning
+- Design and maintain data warehouse schemas (star schema, slowly changing dimensions)
+- Build monitoring and alerting for pipeline health, data freshness, and SLA compliance
+- Collaborate with ML engineers to build feature pipelines and training data infrastructure
+- Write idempotent, fault-tolerant data processing jobs with proper dead-letter queue handling
+- Manage Hadoop/HDFS clusters and optimize storage costs
+
+Requirements:
+- B.Tech/M.Sc. in Computer Science, Statistics, or related field
+- Strong proficiency in Python and SQL
+- Hands-on experience with Apache Spark (PySpark or Scala)
+- Experience with message brokers / streaming systems (Kafka, Kinesis, or Pulsar)
+- Familiarity with Hadoop ecosystem (HDFS, Hive, MapReduce concepts)
+- Experience with AWS data services (S3, EMR, Glue, Athena) or equivalent cloud platform
+- Understanding of data modelling: dimensional modelling, normalization, schema design
+- Experience with workflow orchestration (Airflow, Prefect, or Dagster)
+- Knowledge of Linux, Git, Docker, and CI/CD basics
+- Strong debugging and performance optimization skills
+
+Nice to Have:
+- Experience with real-time anomaly detection or surveillance systems
+- Knowledge of data governance and cataloging tools (AWS Glue Catalog, Apache Atlas)
+- Familiarity with ML feature stores (Feast, Tecton)
+- Experience with PostgreSQL, Redis, or DynamoDB
+- Knowledge of Infrastructure as Code (Terraform, CloudFormation)
+- Competitive programming background
+
+Apply: Submit your application at https://dataforge-careers.greenhouse.io/data-engineer-2026

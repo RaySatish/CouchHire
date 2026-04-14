@@ -1,0 +1,40 @@
+Role: Machine Learning Engineer (New Grad / Entry Level)
+
+Company: QuantumLeap AI
+
+Location: Bangalore, India (Hybrid)
+
+About the Role:
+QuantumLeap AI is building next-generation recommendation systems for India's largest e-commerce platforms. We're looking for a Machine Learning Engineer to join our Applied ML team. You'll design, train, and deploy production ML models that directly impact millions of daily transactions. This role is ideal for a strong new grad with hands-on project experience in ML, deep learning, and data pipelines.
+
+Responsibilities:
+- Design and implement ML models for personalization, ranking, and recommendation systems
+- Build end-to-end ML pipelines: data ingestion, feature engineering, model training, evaluation, and deployment
+- Develop and maintain feature stores and model registries for reproducible experimentation
+- Implement deep learning models (LSTM, Transformer, CNN) for sequential user behavior prediction
+- Conduct A/B testing and statistical analysis to validate model performance in production
+- Optimize model inference latency and throughput for real-time serving
+- Collaborate with data engineers to build scalable ETL pipelines using Apache Spark and Kafka
+- Write clean, tested, production-quality Python code with proper logging and error handling
+- Monitor model drift and implement automated retraining pipelines
+
+Requirements:
+- B.Tech/M.Sc. in Computer Science, Statistics, Mathematics, or related field (2025-2027 graduates welcome)
+- Strong foundation in machine learning: supervised/unsupervised learning, ensemble methods, neural networks
+- Proficiency in Python and ML frameworks (Scikit-learn, TensorFlow, PyTorch)
+- Experience with deep learning architectures: CNNs, LSTMs, Transformers/BERT
+- Hands-on experience with data processing at scale (Pandas, NumPy, Spark)
+- Understanding of statistical concepts: hypothesis testing, confidence intervals, A/B testing
+- Familiarity with SQL and relational databases (PostgreSQL preferred)
+- Experience with Git, Linux, and command-line tools
+- Strong problem-solving skills — competitive programming experience is a plus
+
+Nice to Have:
+- Experience with LLMs, RAG pipelines, or generative AI
+- Knowledge of MLOps tools (MLflow, Kubeflow, SageMaker)
+- Experience with real-time data streaming (Kafka, Kinesis)
+- Published research or conference presentations in ML/AI
+- AWS or cloud platform experience
+- 400+ problems solved on LeetCode/Codeforces
+
+Apply: Send your resume and GitHub link to careers@quantumleap.ai with subject line "ML Engineer — [Your Name]"

@@ -1,0 +1,42 @@
+Role: DevOps / Site Reliability Engineer
+
+Company: InfraScale Technologies
+
+Location: Pune, India (On-site)
+
+About the Role:
+InfraScale Technologies provides managed Kubernetes and cloud infrastructure services to 200+ enterprise clients. We're looking for a DevOps/SRE engineer to manage production infrastructure serving 10M+ requests/day. This is a pure infrastructure role — you'll spend your days writing Terraform, debugging Kubernetes networking issues, managing CI/CD pipelines, and responding to production incidents. No ML, no data science — just rock-solid infrastructure engineering.
+
+Responsibilities:
+- Design, deploy, and manage production Kubernetes clusters (EKS, GKE, self-managed) across multi-cloud environments
+- Write and maintain Infrastructure as Code using Terraform, Helm charts, and Kustomize
+- Build and optimize CI/CD pipelines (GitHub Actions, ArgoCD, Jenkins) with GitOps workflows
+- Manage cloud networking: VPCs, subnets, load balancers, DNS (Route53, CloudFlare), VPN tunnels, service mesh (Istio)
+- Implement observability stacks: Prometheus, Grafana, Loki, Jaeger for distributed tracing
+- Manage container registries, image scanning, and supply chain security (Trivy, Cosign)
+- Respond to production incidents: on-call rotation, root cause analysis, post-mortems, SLO tracking
+- Implement secrets management (Vault, External Secrets Operator) and IAM policies
+- Optimize cloud costs: reserved instances, spot fleet management, right-sizing, FinOps dashboards
+- Automate toil using Bash, Python, and Go scripts; build internal developer platform tooling
+
+Requirements:
+- 3+ years of hands-on DevOps/SRE experience in production environments
+- Expert-level Kubernetes knowledge: deployments, services, ingress, RBAC, network policies, HPA, PDB
+- Strong Terraform skills — modules, state management, workspace strategies
+- Deep understanding of Linux system administration (systemd, networking, performance tuning)
+- Experience with CI/CD platforms and GitOps (ArgoCD, Flux)
+- Strong networking fundamentals: TCP/IP, DNS, TLS, HTTP/2, gRPC, load balancing algorithms
+- Experience with monitoring and alerting: Prometheus, Grafana, PagerDuty, OpsGenie
+- Proficiency in Bash scripting and Python for automation
+- Experience with at least one major cloud provider (AWS preferred, GCP or Azure acceptable)
+- Incident management experience: on-call, runbooks, post-incident reviews
+
+Nice to Have:
+- CKA (Certified Kubernetes Administrator) or AWS Solutions Architect certification
+- Experience with Go programming for infrastructure tooling
+- Knowledge of eBPF, Cilium, or advanced Linux networking
+- Experience with database operations (PostgreSQL, MySQL, Redis) at scale
+- Familiarity with chaos engineering (Litmus, Chaos Monkey)
+- Experience with platform engineering and internal developer portals (Backstage)
+
+Apply: Send your resume to sre-hiring@infrascale.io with subject "SRE — [Your Name]"

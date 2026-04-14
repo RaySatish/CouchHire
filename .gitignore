@@ -38,7 +38,5 @@ CLAUDE.md
 MEMORY.md
 .claude/
 
-tests/
-test_jds/
 # Fine-tuned NLP models — user-specific, never commit
 nlp/models/

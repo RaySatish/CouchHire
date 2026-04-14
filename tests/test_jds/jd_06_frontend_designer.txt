@@ -1,0 +1,42 @@
+Role: Senior UI/UX Designer & Frontend Developer
+
+Company: PixelCraft Studios
+
+Location: Gurgaon, India (On-site)
+
+About the Role:
+PixelCraft Studios is a design-led product studio creating consumer mobile and web experiences for lifestyle, travel, and social media brands. We're looking for a Senior UI/UX Designer who also codes — someone who can take a product from wireframe to pixel-perfect implementation. This is a design-first role; you'll spend 60% of your time in Figma and 40% writing frontend code.
+
+Responsibilities:
+- Lead end-to-end product design: user research, wireframing, prototyping, visual design, and usability testing
+- Create high-fidelity mockups and interactive prototypes in Figma, with design system components
+- Build responsive, accessible frontend interfaces using React, Next.js, and Tailwind CSS
+- Implement complex animations and micro-interactions using Framer Motion and CSS animations
+- Conduct user research: interviews, surveys, A/B testing, heatmap analysis (Hotjar, FullStory)
+- Design and maintain a scalable design system with tokens, components, and documentation
+- Collaborate with product managers to translate user stories into intuitive UI flows
+- Optimize Core Web Vitals and frontend performance (LCP, FID, CLS)
+- Implement pixel-perfect designs with cross-browser and cross-device compatibility
+- Mentor junior designers on design thinking methodology and frontend best practices
+
+Requirements:
+- 4+ years of professional UI/UX design experience with a strong portfolio
+- Expert-level proficiency in Figma (auto-layout, components, variables, prototyping)
+- Strong frontend skills: React.js, Next.js, TypeScript, Tailwind CSS, HTML5, CSS3
+- Experience with animation libraries: Framer Motion, GSAP, Lottie
+- Deep understanding of design principles: typography, color theory, layout, visual hierarchy, accessibility (WCAG 2.1)
+- Experience with user research methodologies and usability testing tools
+- Knowledge of design systems: Atomic Design, token-based theming, Storybook
+- Familiarity with version control (Git) and CI/CD for frontend deployments
+- Experience with mobile-first responsive design and progressive web apps (PWAs)
+- Strong visual portfolio demonstrating consumer product design work
+
+Nice to Have:
+- Experience with 3D design tools (Spline, Blender for web)
+- Knowledge of WebGL, Three.js, or shader programming
+- Experience with design-to-code tools (Anima, Locofy)
+- Illustration or motion graphics skills (After Effects, Rive)
+- Experience with CMS platforms (Contentful, Sanity, Strapi)
+- Background in graphic design or visual communication
+
+Apply: Submit your portfolio and resume at https://pixelcraft.careers.lever.co/senior-ui-ux-frontend
