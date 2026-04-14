@@ -52,3 +52,7 @@ pytest-cov>=5.0.0               # Coverage reporting
 
 # --- Logging / Dev -----------------------------------------------------------
 rich>=13.7.0                    # Pretty logging and console output (optional but nice)
+
+# --- Dashboard (Step 26) ---------------------------------------------------
+plotly>=5.18.0                  # Interactive charts for analytics tab
+PyYAML>=6.0.1                   # config.yaml read/write for settings tab
