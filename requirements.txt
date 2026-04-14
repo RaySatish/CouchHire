@@ -56,3 +56,4 @@ rich>=13.7.0                    # Pretty logging and console output (optional bu
 # --- Dashboard (Step 26) ---------------------------------------------------
 plotly>=5.18.0                  # Interactive charts for analytics tab
 PyYAML>=6.0.1                   # config.yaml read/write for settings tab
+pandas>=2.1
