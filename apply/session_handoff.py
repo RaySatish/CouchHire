@@ -22,7 +22,7 @@ import urllib.request
 from pathlib import Path
 from subprocess import Popen
 
-from config import CDP_PORT
+from config import BROWSER_PROFILE_DIR, CDP_PORT
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +159,10 @@ def launch_browser(session_id: str = "default", headless: bool = True) -> dict:
 
     port = CDP_PORT
     executable = _find_chromium_executable()
-    user_data_dir = Path(f"/tmp/couchhire-chrome-{session_id}")
+    # Use persistent profile dir so cookies/logins survive across runs.
+    # Create it if it doesn't exist yet.
+    user_data_dir = BROWSER_PROFILE_DIR
+    user_data_dir.mkdir(parents=True, exist_ok=True)
 
     # Build command
     cmd = [
@@ -304,10 +307,56 @@ def close_browser(session_id: str = "default") -> None:
             process.kill()
             process.wait(timeout=5)
 
-    # Clean up user-data-dir
-    user_data_dir = Path(f"/tmp/couchhire-chrome-{session_id}")
-    if user_data_dir.exists():
-        shutil.rmtree(user_data_dir, ignore_errors=True)
-        logger.debug("Cleaned up user-data-dir: %s", user_data_dir)
+    # Profile dir is persistent (BROWSER_PROFILE_DIR) — NOT deleted on close.
+    # This preserves cookies, sessions, and localStorage across runs.
 
     logger.info("Browser closed (session=%s)", session_id)
+
+
+# ---------------------------------------------------------------------------
+# CLI: first-time browser setup (sign into Google, LinkedIn, etc.)
+# ---------------------------------------------------------------------------
+
+def setup_browser_profile() -> None:
+    """Launch a visible browser with the persistent profile for manual login.
+
+    Usage:
+        python -m apply.session_handoff --setup
+
+    Sign into your accounts (Google, LinkedIn, etc.), then close the browser.
+    All sessions will be saved to BROWSER_PROFILE_DIR and reused automatically.
+    """
+    import sys
+
+    print(f"\n🔧 Browser Profile Setup")
+    print(f"   Profile dir: {BROWSER_PROFILE_DIR}")
+    print(f"   CDP port:    {CDP_PORT}\n")
+    print("A browser window will open. Sign into your accounts:")
+    print("  • Google (for Google Forms)")
+    print("  • LinkedIn (for LinkedIn Easy Apply)")
+    print("  • Any other services you use\n")
+    print("When done, close the browser or press Ctrl+C here.\n")
+
+    info = launch_browser(session_id="setup", headless=False)
+    print(f"✅ Browser launched (pid={info['pid']})")
+    print("   Sign into your accounts, then close the browser window.\n")
+
+    try:
+        # Wait for the browser process to exit (user closes it)
+        _SESSIONS["setup"]["process"].wait()
+        print("\n✅ Browser closed. Your sessions are saved!")
+        print(f"   Profile: {BROWSER_PROFILE_DIR}\n")
+    except KeyboardInterrupt:
+        print("\n⏹️  Closing browser...")
+        close_browser("setup")
+        print(f"✅ Sessions saved to {BROWSER_PROFILE_DIR}\n")
+
+
+if __name__ == "__main__":
+    import sys
+    if "--setup" in sys.argv:
+        setup_browser_profile()
+    else:
+        print("Usage: python -m apply.session_handoff --setup")
+        print("  Launch a browser to sign into your accounts (Google, LinkedIn, etc.)")
+        print(f"  Profile saved to: {BROWSER_PROFILE_DIR}")

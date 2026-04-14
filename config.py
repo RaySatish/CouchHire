@@ -126,6 +126,15 @@ APPLICANT_LINKEDIN: str | None = _env("APPLICANT_LINKEDIN")
 # Default: false (visible browser for development). Set to true in production.
 BROWSER_HEADLESS: bool = os.getenv("BROWSER_HEADLESS", "false").lower() in ("true", "1", "yes")
 
+# Persistent browser profile directory — stores cookies, sessions, localStorage.
+# Sign in to Google/LinkedIn once; subsequent runs reuse the session.
+# Default: ~/.couchhire/browser_profile/
+_raw_browser_profile = _env("BROWSER_PROFILE_DIR")
+BROWSER_PROFILE_DIR: Path = (
+    Path(_raw_browser_profile) if _raw_browser_profile is not None
+    else Path.home() / ".couchhire" / "browser_profile"
+)
+
 # Path to persistent answer memory for ATS form fields.
 # Defaults to cv/output/form_answers.json (gitignored).
 _raw_form_answers = _env("FORM_ANSWERS_PATH")

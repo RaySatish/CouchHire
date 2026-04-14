@@ -7,8 +7,9 @@ All functions are synchronous and use the Supabase Python client.
 import logging
 from typing import Any
 
+import httpx
 from postgrest.exceptions import APIError
-from supabase import Client, create_client
+from supabase import Client, ClientOptions, create_client
 
 from config import SUPABASE_KEY, SUPABASE_URL
 
@@ -26,12 +27,19 @@ _TABLE = "applications"
 _client: Client | None = None
 
 
+# Timeout for Supabase REST calls.  The default httpx timeout (120 s connect)
+# causes the pipeline to hang for over 2 minutes when Supabase is unreachable.
+# Use httpx.Timeout to cap the TCP *connect* phase at 3 s and reads at 5 s.
+_DB_TIMEOUT = httpx.Timeout(5.0, connect=3.0)
+
+
 def _get_client() -> Client:
     """Return a cached Supabase client, creating it on first call."""
     global _client
     if _client is None:
-        _client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logger.debug("Supabase client initialised for %s", SUPABASE_URL)
+        opts = ClientOptions(postgrest_client_timeout=_DB_TIMEOUT)
+        _client = create_client(SUPABASE_URL, SUPABASE_KEY, options=opts)
+        logger.debug("Supabase client initialised for %s (timeout=%ss)", SUPABASE_URL, _DB_TIMEOUT)
     return _client
 
 

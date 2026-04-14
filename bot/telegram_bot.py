@@ -560,7 +560,7 @@ async def _handle_outcome(update: Update, context) -> None:
 
     if label not in _VALID_OUTCOMES:
         await update.message.reply_text(
-            f"\u274c Invalid label: <code>{_escape_html(label)}</code>\n\n"
+            f"❌ Invalid label: <code>{_escape_html(label)}</code>\n\n"
             f"Valid labels: interview, rejected, no_response, offer, withdrawn",
             parse_mode="HTML",
         )
@@ -577,7 +577,7 @@ async def _handle_outcome(update: Update, context) -> None:
     except Exception as exc:
         logger.error("Failed to update outcome for %s: %s", application_id, exc)
         await update.message.reply_text(
-            f"\u274c Failed to update: {_escape_html(str(exc))}",
+            f"❌ Failed to update: {_escape_html(str(exc))}",
             parse_mode="HTML",
         )
         return
@@ -610,7 +610,7 @@ async def _handle_outcome(update: Update, context) -> None:
                         )
                 except Exception as exc:
                     logger.error("Background retrain failed: %s", exc, exc_info=True)
-                    send_notification(f"\u274c Retrain failed: {exc}")
+                    send_notification(f"❌ Retrain failed: {exc}")
 
             threading.Thread(target=_retrain_background, daemon=True).start()
     except ImportError:
@@ -639,23 +639,31 @@ async def _handle_apply(update: Update, context) -> None:
     Usage:
         /apply <job URL>
         /apply <pasted JD text>
+        /apply <JD text with embedded apply URL or email>
 
-    Detects whether the input is a URL or raw JD text, confirms receipt,
-    and triggers the pipeline in a background thread.
+    Detects three input modes:
+      1. URL-only   — input is just a URL (no meaningful text) → scrape URL for JD
+      2. JD + URL   — input has JD text with an embedded URL  → use text as JD, URL as apply target
+      3. JD + email — input has JD text with an embedded email → use text as JD (email extracted by jd_parser)
+      4. JD only    — no URL or email                          → use text as JD
+
+    Confirms receipt and triggers the pipeline in a background thread.
     """
     if not context.args:
         await update.message.reply_text(
             "📋 <b>Usage:</b>\n\n"
             "<code>/apply https://jobs.lever.co/company/...</code>\n"
             "or\n"
-            "<code>/apply &lt;paste full JD text here&gt;</code>",
+            "<code>/apply &lt;paste full JD text here&gt;</code>\n"
+            "or\n"
+            "<code>/apply &lt;JD text with apply link&gt;</code>",
             parse_mode="HTML",
         )
         return
 
     raw_input = " ".join(context.args)
 
-    # Detect if input is a URL or raw JD text
+    # Extract URLs and determine input type
     url_pattern = re.compile(
         r"""https?://[^\s<>"']+""",
         re.IGNORECASE,
@@ -663,14 +671,37 @@ async def _handle_apply(update: Update, context) -> None:
     urls = url_pattern.findall(raw_input)
 
     if urls:
-        # URL mode — extract the first URL
         job_url = urls[0]
-        input_type = "url"
-        preview = f"🔗 <code>{_escape_html(job_url)}</code>"
+        # Determine if this is URL-only or JD text with an embedded URL.
+        # Strip all URLs from the input and check if meaningful text remains.
+        text_without_urls = raw_input
+        for u in urls:
+            text_without_urls = text_without_urls.replace(u, "")
+        # Remove common link prefixes/labels that aren't real JD content
+        text_without_urls = re.sub(
+            r"(?i)(how\s+to\s+apply\s*:?|apply\s+(?:here|at|via|now)\s*:?|link\s*:?)",
+            "",
+            text_without_urls,
+        )
+        remaining_text = text_without_urls.strip()
+
+        if len(remaining_text) < 30:
+            # URL-only mode — not enough text to be a JD
+            input_type = "url"
+            preview = f"🔗 <code>{_escape_html(job_url)}</code>"
+        else:
+            # JD text + embedded URL — use text as JD, URL as apply target
+            input_type = "jd_with_url"
+            snippet = raw_input[:200].strip()
+            if len(raw_input) > 200:
+                snippet += "..."
+            preview = (
+                f"<i>{_escape_html(snippet)}</i>\n"
+                f"🔗 Apply link: <code>{_escape_html(job_url)}</code>"
+            )
     else:
-        # Raw JD text mode
+        # Raw JD text mode (may contain an email — jd_parser will extract it)
         input_type = "jd"
-        # Show first 200 chars as preview
         snippet = raw_input[:200].strip()
         if len(raw_input) > 200:
             snippet += "..."
@@ -695,8 +726,15 @@ async def _handle_apply(update: Update, context) -> None:
         from pipeline import run_pipeline
         try:
             if input_type == "url":
+                # URL-only: scrape the URL for JD content
                 run_pipeline(jd_url=job_url, source="telegram")
+            elif input_type == "jd_with_url":
+                # JD text + URL: use text as JD, pass URL so pipeline
+                # uses it as apply_target (scrape is skipped since jd_text
+                # is already provided)
+                run_pipeline(jd_text=raw_input, jd_url=job_url, source="telegram")
             else:
+                # JD text only (may contain email — jd_parser extracts it)
                 run_pipeline(jd_text=raw_input, source="telegram")
         except Exception as exc:
             logger.error("Pipeline failed: %s", exc, exc_info=True)
@@ -705,7 +743,6 @@ async def _handle_apply(update: Update, context) -> None:
     t = threading.Thread(target=_run_pipeline_thread, daemon=True)
     t.start()
     logger.info("Pipeline thread started for /apply (type=%s)", input_type)
-
 
 # ---------------------------------------------------------------------------
 # /search command — JobSpy job discovery

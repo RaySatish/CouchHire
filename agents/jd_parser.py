@@ -55,7 +55,8 @@ Return exactly this JSON schema:
 
 Rules:
 - "apply_method": "email" if the JD says to email an address. "url" if it \
-provides an application link (Greenhouse, Lever, Workday, Ashby, etc.). \
+provides an application link (Greenhouse, Lever, Workday, Ashby, Google Forms, \
+Typeform, Airtable, JotForm, Tally, or any other application URL). \
 "unknown" if neither is found.
 - "apply_target": the email address (for email) or URL (for url). null if unknown.
 - "cover_letter_required": true only if the JD explicitly asks for a cover letter.

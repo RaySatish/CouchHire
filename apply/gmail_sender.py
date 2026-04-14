@@ -205,6 +205,170 @@ async def _lookup_draft_message_id(session: ClientSession, subject: str) -> str 
     return None
 
 
+
+async def _fetch_draft_content_via_mcp(
+    original_subject: str,
+    stale_message_id: str | None = None,
+) -> dict | None:
+    """Fetch the current content of a Gmail draft, picking up user edits.
+
+    Gmail changes a draft's internal message ID every time the user edits it
+    in the web UI.  The message_id we stored at creation time becomes stale,
+    and ``get_gmail_message_content`` returns 404.
+
+    This function **always searches** for the draft by subject to find the
+    current message ID, then fetches its content.  The search adds ~1s but
+    guarantees we get the user's edited version.
+
+    Parameters
+    ----------
+    original_subject : str
+        The email subject used when creating the draft.  Used to search
+        for the draft in Gmail.
+    stale_message_id : str or None
+        Unused — kept for API compatibility.  We always search by subject
+        because Gmail changes the message ID on every draft edit.
+
+    Returns a dict with keys: subject, body, to, cc, bcc (all str or None),
+    or None if the fetch fails entirely.
+    """
+    import re as _re
+
+    logger.info(
+        "Fetching edited draft from Gmail (searching by subject=%r)",
+        original_subject[:80],
+    )
+
+    try:
+        async with streamablehttp_client(GMAIL_MCP_URL) as (rs, ws, _):
+            async with ClientSession(rs, ws) as sess:
+                await sess.initialize()
+
+                # Search for the draft by subject
+                search_result = await sess.call_tool("search_gmail_messages", {
+                    "query": f'subject:"{original_subject}" in:drafts newer_than:1d',
+                    "user_google_email": APPLICANT_EMAIL,
+                    "page_size": 3,
+                })
+
+                # Extract message ID from search results
+                found_id = None
+                if hasattr(search_result, "content") and search_result.content:
+                    for block in search_result.content:
+                        if hasattr(block, "text") and block.text:
+                            m = _re.search(r"Message ID:\s*([a-f0-9]+)", block.text)
+                            if m:
+                                found_id = m.group(1)
+                                break
+
+                if not found_id:
+                    logger.warning(
+                        "Could not find draft in Gmail (subject=%r) — "
+                        "draft may have been sent, deleted, or subject changed",
+                        original_subject[:60],
+                    )
+                    return None
+
+                logger.info("Found draft message_id=%s via search", found_id)
+
+                # Fetch the content with the current ID
+                result = await sess.call_tool("get_gmail_message_content", {
+                    "message_id": found_id,
+                    "user_google_email": APPLICANT_EMAIL,
+                    "body_format": "text",
+                })
+
+                return _parse_mcp_message_content(result, _re)
+
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch draft content (subject=%r): %s — will fall back to original",
+            original_subject[:60], exc,
+        )
+        return None
+
+
+def _parse_mcp_message_content(result: object, _re) -> dict | None:
+    """Parse a get_gmail_message_content MCP result into a dict.
+
+    Returns dict with keys: subject, body, to, cc, bcc (all str or None),
+    or None if parsing fails.
+    """
+    if not hasattr(result, "content") or not result.content:
+        return None
+
+    full_text = ""
+    for block in result.content:
+        if hasattr(block, "text") and block.text:
+            full_text += block.text
+
+    if not full_text:
+        return None
+
+    logger.debug("Draft content fetched (%d chars)", len(full_text))
+
+    # google_workspace_mcp returns:
+    #   Subject: <subject>
+    #   From: <from>
+    #   To: <to>
+    #   ...
+    #   --- BODY ---
+    #   <body text>
+    draft: dict = {}
+
+    subj_match = _re.search(r"^Subject:\s*(.+?)$", full_text, _re.MULTILINE)
+    draft["subject"] = subj_match.group(1).strip() if subj_match else None
+
+    to_match = _re.search(r"^To:\s*(.+?)$", full_text, _re.MULTILINE)
+    draft["to"] = to_match.group(1).strip() if to_match else None
+
+    cc_match = _re.search(r"^CC:\s*(.+?)$", full_text, _re.MULTILINE)
+    draft["cc"] = cc_match.group(1).strip() if cc_match else None
+
+    bcc_match = _re.search(r"^BCC:\s*(.+?)$", full_text, _re.MULTILINE)
+    draft["bcc"] = bcc_match.group(1).strip() if bcc_match else None
+
+    # Body: everything after "--- BODY ---" or "Body:" line
+    body_match = _re.search(
+        r"^(?:---\s*BODY\s*---|Body:)\s*\n(.*)",
+        full_text, _re.MULTILINE | _re.DOTALL,
+    )
+    if body_match:
+        draft["body"] = body_match.group(1).strip()
+    else:
+        # Fallback: everything after the first blank line (end of headers)
+        parts = full_text.split("\n\n", 1)
+        draft["body"] = parts[1].strip() if len(parts) > 1 else None
+
+    # Strip attachment metadata appended by the MCP server.
+    # get_gmail_message_content returns attachment info after the body like:
+    #   --- ATTACHMENTS ---
+    #   1. Resume.pdf (application/pdf, 120.0 KB)
+    #      Attachment ID: ANGjdJ...
+    #      Use get_gmail_attachment_content(...) to download
+    # This must NOT be included in the email body when re-sending.
+    if draft.get("body"):
+        att_marker = _re.search(
+            r"\n---\s*ATTACHMENTS?\s*---",
+            draft["body"],
+            _re.IGNORECASE,
+        )
+        if att_marker:
+            draft["body"] = draft["body"][:att_marker.start()].strip()
+            logger.debug(
+                "Stripped attachment metadata from body (removed %d chars)",
+                len(draft["body"]) - att_marker.start(),
+            )
+
+    logger.info(
+        "Draft content parsed — subject=%s, to=%s, body_len=%d",
+        draft.get("subject", "(none)"),
+        draft.get("to", "(none)"),
+        len(draft.get("body") or ""),
+    )
+    return draft
+
+
 async def _send_email_via_mcp(
     subject: str,
     body: str,
@@ -453,23 +617,32 @@ def send_email(
     body: str,
     recipient_email: str,
     attachments: list[str] | None = None,
+    draft_message_id: str | None = None,
 ) -> str | None:
     """Send an email via the Gmail MCP server.
 
-    Called by the pipeline after Gate 2 approval.  The MCP server does not
-    support sending an existing draft by ID, so we re-compose the email from
-    the same details used to create the draft.
+    Called by the pipeline after Gate 2 approval.  Before sending, if a
+    ``draft_message_id`` is provided, the function fetches the **current**
+    draft content from Gmail.  This ensures that any edits the user made
+    in the Gmail UI (subject, body, recipients) are respected.
+
+    If the draft fetch fails or ``draft_message_id`` is not provided,
+    falls back to sending with the original ``subject``/``body``/
+    ``recipient_email`` from pipeline state.
 
     Parameters
     ----------
     subject : str
-        Email subject line.
+        Original email subject line (fallback).
     body : str
-        Email body text.
+        Original email body text (fallback).
     recipient_email : str
-        Recipient email address.
+        Original recipient email address (fallback).
     attachments : list[str] or None
         List of file paths to attach (PDFs).
+    draft_message_id : str or None
+        The Gmail message ID of the draft (hex ID used in web URLs).
+        If provided, the draft is fetched from Gmail to pick up user edits.
 
     Returns
     -------
@@ -483,8 +656,54 @@ def send_email(
     RuntimeError
         If the MCP server returns an error.
     """
+    # Try to fetch the edited draft content from Gmail
+    final_subject = subject
+    final_body = body
+    final_recipient = recipient_email
+
+    if draft_message_id:
+        logger.info(
+            "Fetching draft from Gmail before sending (message_id=%s) "
+            "to pick up any user edits...",
+            draft_message_id,
+        )
+        try:
+            draft_content = _run_async(
+                _fetch_draft_content_via_mcp(
+                    original_subject=subject,
+                    stale_message_id=draft_message_id,
+                )
+            )
+            if draft_content:
+                # Use fetched values, falling back to originals if any field is missing
+                if draft_content.get("subject"):
+                    final_subject = draft_content["subject"]
+                    if final_subject != subject:
+                        logger.info("User edited subject: %r -> %r", subject, final_subject)
+                if draft_content.get("body"):
+                    final_body = draft_content["body"]
+                    if final_body != body:
+                        logger.info("User edited email body (original %d chars -> edited %d chars)",
+                                    len(body), len(final_body))
+                if draft_content.get("to"):
+                    # Extract just the email from "Name <email>" format if needed
+                    fetched_to = draft_content["to"]
+                    if "<" in fetched_to and ">" in fetched_to:
+                        import re as _re
+                        email_match = _re.search(r"<([^>]+)>", fetched_to)
+                        if email_match:
+                            fetched_to = email_match.group(1)
+                    final_recipient = fetched_to
+                    if final_recipient != recipient_email:
+                        logger.info("User edited recipient: %r -> %r", recipient_email, final_recipient)
+                logger.info("Using edited draft content for sending")
+            else:
+                logger.warning("Draft fetch returned None — sending with original content")
+        except Exception as exc:
+            logger.warning("Failed to fetch edited draft: %s — sending with original content", exc)
+
     attachment_list = [a for a in (attachments or []) if a]
-    return _run_async(_send_email_via_mcp(subject, body, recipient_email, attachment_list))
+    return _run_async(_send_email_via_mcp(final_subject, final_body, final_recipient, attachment_list))
 
 
 def send_draft(draft_id: str) -> bool:

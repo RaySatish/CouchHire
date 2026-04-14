@@ -152,6 +152,14 @@ _ATS_FORM_PATTERNS: list[_re.Pattern[str]] = [
     _re.compile(r"taleo\.net/", _re.I),
     _re.compile(r"successfactors\.com/", _re.I),
     _re.compile(r"phenom(?:people)?\.com/", _re.I),
+    # Generic form / survey platforms (commonly used for job applications)
+    _re.compile(r"docs\.google\.com/forms/", _re.I),
+    _re.compile(r"forms\.gle/", _re.I),
+    _re.compile(r"typeform\.com/to/", _re.I),
+    _re.compile(r"airtable\.com/(?:shr|app)", _re.I),
+    _re.compile(r"jotform\.com/", _re.I),
+    _re.compile(r"tally\.so/r/", _re.I),
+    _re.compile(r"fillout\.com/t/", _re.I),
     # URL path contains /apply (common across many ATS)
     _re.compile(r"/apply(?:/|$|\?)", _re.I),
 ]
@@ -1276,7 +1284,7 @@ def node_execute_send(state: PipelineState) -> PipelineState:
     draft_id = state.get("draft_id", "")
 
     if route in ("email", "manual"):
-        # Send the email via MCP (re-compose from state, since MCP has no send-draft-by-ID)
+        # Send the email via MCP — fetch edited draft content from Gmail first
         reqs = state.get("requirements", {})
         recipient = reqs.get("apply_target", "") if route == "email" else ""
         subject = state.get("email_subject", "")
@@ -1295,6 +1303,18 @@ def node_execute_send(state: PipelineState) -> PipelineState:
         if state.get("cover_letter_pdf_path") and Path(state["cover_letter_pdf_path"]).exists():
             attachments.append(state["cover_letter_pdf_path"])
 
+        # Extract the hex message_id from draft_url so send_email can
+        # fetch the user's edited draft content before sending.
+        draft_message_id = None
+        draft_url = state.get("draft_url", "")
+        if draft_url:
+            import re as _re
+            # URL format: https://mail.google.com/mail/u/0/#all/<hex_id>
+            mid_match = _re.search(r"#(?:all|drafts)/([a-f0-9]+)$", draft_url)
+            if mid_match:
+                draft_message_id = mid_match.group(1)
+                logger.info("  Draft message_id for edit-fetch: %s", draft_message_id)
+
         try:
             from apply.gmail_sender import send_email
             sent = send_email(
@@ -1302,6 +1322,7 @@ def node_execute_send(state: PipelineState) -> PipelineState:
                 body=body,
                 recipient_email=recipient,
                 attachments=attachments if attachments else None,
+                draft_message_id=draft_message_id,
             )
             if sent:
                 logger.info("  Email sent successfully (to=%s, subject=%s, message_id=%s)", recipient, subject, sent)
@@ -1798,20 +1819,35 @@ def run_pipeline(
         "source": source,
     }
 
-    # Pre-create DB record if we don't have one
+    # Pre-create DB record if we don't have one (hard 5s timeout to avoid blocking)
     if not application_id:
-        try:
-            from db.supabase_client import insert_application
+        import threading as _thr
 
-            row = insert_application({
-                "jd_text": jd_text,
-                "jd_url": jd_url,
-                "status": "pending",
-            })
-            initial_state["application_id"] = row.get("id")
-            logger.info("Created application record: %s", row.get("id"))
-        except Exception as exc:
-            logger.warning("Failed to pre-create DB record: %s", exc)
+        _db_result: dict = {}
+
+        def _pre_create_db():
+            try:
+                from db.supabase_client import insert_application
+                row = insert_application({
+                    "jd_text": jd_text,
+                    "jd_url": jd_url,
+                    "status": "pending",
+                })
+                _db_result["id"] = row.get("id")
+            except Exception as exc:
+                _db_result["error"] = str(exc)
+
+        _db_thread = _thr.Thread(target=_pre_create_db, daemon=True)
+        _db_thread.start()
+        _db_thread.join(timeout=5.0)  # hard 5s cap — never blocks pipeline
+
+        if _db_thread.is_alive():
+            logger.warning("Supabase pre-create timed out after 5s — continuing without DB record")
+        elif "error" in _db_result:
+            logger.warning("Failed to pre-create DB record: %s", _db_result["error"])
+        elif "id" in _db_result:
+            initial_state["application_id"] = _db_result["id"]
+            logger.info("Created application record: %s", _db_result["id"])
 
     app = _compiled_pipeline
 

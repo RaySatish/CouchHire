@@ -876,14 +876,88 @@ _EXTRACT_FIELDS_JS = """
 () => {
     const fields = [];
 
+    // Detect Google Forms — used by getLabel and buildSelector
+    const _isGoogleForms = !!(
+        location.hostname === 'docs.google.com' ||
+        document.querySelector('.freebirdFormviewerViewFormCard') ||
+        (document.querySelector('[data-params]') && location.href.includes('/forms/'))
+    );
+
+    function _getGoogleFormsLabel(el) {
+        // Google Forms: question text is NOT on the input element.
+        // Walk up to the question container and find the heading text.
+        // Containers: [data-params], [role="listitem"], [data-item-id], or freebird classes
+        const container = el.closest('[data-params]') || el.closest('[data-item-id]')
+                       || el.closest('[role="listitem"]')
+                       || el.closest('.freebirdFormviewerComponentsQuestionBaseRoot')
+                       || el.closest('.Qr7Oae');  // newer Google Forms question container
+        if (!container) return '';
+
+        // Primary: look for the question title element (multiple class names across versions)
+        const titleEl = container.querySelector('.M7eMe')          // classic
+                     || container.querySelector('[role="heading"]') // accessible heading
+                     || container.querySelector('.freebirdFormviewerComponentsQuestionBaseTitle')
+                     || container.querySelector('.exportItemTitle')
+                     || container.querySelector('.Qr7Oae > div > div > span') // newer layout
+                     || container.querySelector('[data-initial-value][aria-label]');  // section headers
+        if (titleEl) {
+            const text = titleEl.textContent.trim();
+            if (text && text !== 'Your answer' && text.length < 200) return text;
+        }
+
+        // Try aria-describedby on the input itself (Google sometimes sets this)
+        const describedBy = el.getAttribute('aria-describedby');
+        if (describedBy) {
+            const descEl = document.getElementById(describedBy);
+            if (descEl) {
+                const t = descEl.textContent.trim();
+                if (t && t !== 'Your answer' && t.length < 200) return t;
+            }
+        }
+
+        // Try aria-labelledby on the input (Google Forms often uses this)
+        const labelledBy = el.getAttribute('aria-labelledby');
+        if (labelledBy) {
+            // aria-labelledby can have multiple IDs separated by spaces
+            const ids = labelledBy.split(/\\s+/);
+            for (const id of ids) {
+                const lbl = document.getElementById(id);
+                if (lbl) {
+                    const t = lbl.textContent.trim();
+                    if (t && t !== 'Your answer' && t !== '*' && t.length > 2 && t.length < 200) return t;
+                }
+            }
+        }
+
+        // Fallback: first substantial text node in the container that isn't "Your answer"
+        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+        let node;
+        while (node = walker.nextNode()) {
+            const t = node.textContent.trim();
+            if (t && t.length > 2 && t.length < 200 && t !== 'Your answer'
+                && t !== '*' && !t.startsWith('http') && t !== 'Required') {
+                return t;
+            }
+        }
+        return '';
+    }
+
     function getLabel(el) {
+        // Google Forms: skip standard strategies (they return useless "Your answer")
+        if (_isGoogleForms) {
+            const gLabel = _getGoogleFormsLabel(el);
+            if (gLabel) return gLabel;
+            // Still try aria-labelledby and placeholder as final fallbacks
+        }
+
         // 1. <label for="id">
         if (el.id) {
             const label = document.querySelector('label[for="' + el.id + '"]');
             if (label && label.textContent.trim()) return label.textContent.trim();
         }
-        // 2. aria-label
-        if (el.getAttribute('aria-label')) return el.getAttribute('aria-label').trim();
+        // 2. aria-label (skip generic "Your answer" from Google Forms)
+        const ariaLabel = el.getAttribute('aria-label');
+        if (ariaLabel && ariaLabel.trim() !== 'Your answer') return ariaLabel.trim();
         // 3. aria-labelledby
         const labelledBy = el.getAttribute('aria-labelledby');
         if (labelledBy) {
@@ -913,14 +987,135 @@ _EXTRACT_FIELDS_JS = """
     function buildSelector(el) {
         if (el.id) return '#' + CSS.escape(el.id);
         if (el.name) return el.tagName.toLowerCase() + '[name="' + el.name + '"]';
-        // Positional fallback
+
+        // Google Forms: inputs have unique class combos and data attributes.
+        // Build a selector anchored to the question container.
+        if (_isGoogleForms) {
+            // Strategy 1: Use aria-labelledby (most reliable on newer Google Forms)
+            const ariaLbl = el.getAttribute('aria-labelledby');
+            if (ariaLbl) {
+                // Use the first ID from aria-labelledby as a unique anchor
+                const firstId = ariaLbl.split(/\\s+/)[0];
+                if (firstId && document.getElementById(firstId)) {
+                    const tag = el.tagName.toLowerCase();
+                    // Check if this selector is unique
+                    const candidate = '[aria-labelledby*="' + firstId + '"]';
+                    const matches = document.querySelectorAll(candidate);
+                    if (matches.length === 1) {
+                        return candidate;
+                    }
+                    // Not unique — add tag qualifier
+                    const tagCandidate = tag + '[aria-labelledby*="' + firstId + '"]';
+                    const tagMatches = document.querySelectorAll(tagCandidate);
+                    if (tagMatches.length === 1) {
+                        return tagCandidate;
+                    }
+                }
+            }
+
+            // Strategy 2: Use data-params container with question ID
+            const container = el.closest('[data-params]');
+            if (container) {
+                const params = container.getAttribute('data-params');
+                const idMatch = params && params.match(/\\[\\s*(\\d{5,})/);
+                if (idMatch) {
+                    const qId = idMatch[1];
+                    const tag = el.tagName.toLowerCase();
+                    const sameTag = container.querySelectorAll(tag);
+                    if (sameTag.length === 1) {
+                        return '[data-params*="' + qId + '"] ' + tag;
+                    } else {
+                        const idx = Array.from(sameTag).indexOf(el) + 1;
+                        return '[data-params*="' + qId + '"] ' + tag + ':nth-of-type(' + idx + ')';
+                    }
+                }
+            }
+
+            // Strategy 3: Use data-item-id container (newer Google Forms)
+            const itemContainer = el.closest('[data-item-id]');
+            if (itemContainer) {
+                const itemId = itemContainer.getAttribute('data-item-id');
+                if (itemId) {
+                    const tag = el.tagName.toLowerCase();
+                    const sameTag = itemContainer.querySelectorAll(tag);
+                    if (sameTag.length === 1) {
+                        return '[data-item-id="' + itemId + '"] ' + tag;
+                    } else {
+                        const idx = Array.from(sameTag).indexOf(el) + 1;
+                        return '[data-item-id="' + itemId + '"] ' + tag + ':nth-of-type(' + idx + ')';
+                    }
+                }
+            }
+
+            // Strategy 4: Class-based selector (last resort for Google Forms)
+            const cls = typeof el.className === 'string' ? el.className.trim() : '';
+            if (cls) {
+                const primaryClass = cls.split(/\\s+/)[0];
+                try {
+                    const allWithClass = document.querySelectorAll('.' + CSS.escape(primaryClass));
+                    const idx = Array.from(allWithClass).indexOf(el);
+                    if (allWithClass.length === 1) {
+                        return '.' + CSS.escape(primaryClass);
+                    } else if (idx >= 0) {
+                        return '.' + CSS.escape(primaryClass) + ':nth-of-type(' + (idx + 1) + ')';
+                    }
+                } catch(e) {
+                    // CSS.escape might fail on unusual class names
+                }
+            }
+        }
+
+        // Standard fallback: positional within parent
         const tag = el.tagName.toLowerCase();
         const parent = el.parentElement;
         if (parent) {
+            // Build a more specific parent selector
+            let parentSel = '';
+            const parentTag = parent.tagName.toLowerCase();
+            if (parent.id) {
+                parentSel = '#' + CSS.escape(parent.id);
+            } else if (typeof parent.className === 'string' && parent.className.trim()) {
+                const parentClass = parent.className.trim().split(/\\s+/)[0];
+                try {
+                    parentSel = parentTag + '.' + CSS.escape(parentClass);
+                } catch(e) {
+                    parentSel = parentTag;
+                }
+            } else {
+                parentSel = parentTag;
+            }
+
+            // SAFETY: never produce "tag > tag" selectors (e.g., input > input)
+            // This happens when parent is same element type — use a higher ancestor instead
+            if (parentSel === tag || parentSel === parentTag && parentTag === tag) {
+                // Walk up to find a suitable non-same-tag ancestor
+                let ancestor = parent.parentElement;
+                let depth = 0;
+                while (ancestor && depth < 5) {
+                    const aTag = ancestor.tagName.toLowerCase();
+                    if (ancestor.id) {
+                        parentSel = '#' + CSS.escape(ancestor.id);
+                        break;
+                    } else if (typeof ancestor.className === 'string' && ancestor.className.trim()) {
+                        const aClass = ancestor.className.trim().split(/\\s+/)[0];
+                        try {
+                            parentSel = aTag + '.' + CSS.escape(aClass);
+                        } catch(e) {
+                            parentSel = aTag;
+                        }
+                        if (parentSel !== tag) break;
+                    } else if (aTag !== tag) {
+                        parentSel = aTag;
+                        break;
+                    }
+                    ancestor = ancestor.parentElement;
+                    depth++;
+                }
+            }
+
             const siblings = Array.from(parent.querySelectorAll(':scope > ' + tag));
             const idx = siblings.indexOf(el) + 1;
             if (idx > 0) {
-                const parentSel = parent.id ? '#' + CSS.escape(parent.id) : tag;
                 return parentSel + ' > ' + tag + ':nth-of-type(' + idx + ')';
             }
         }
@@ -996,6 +1191,179 @@ _EXTRACT_FIELDS_JS = """
         if (f) fields.push(f);
     });
 
+
+    // -----------------------------------------------------------------------
+    // Google Forms custom widgets (radio groups, checkbox groups, dropdowns)
+    // These are NOT standard <input>/<select> elements — they use ARIA roles.
+    // -----------------------------------------------------------------------
+    if (_isGoogleForms) {
+        // Track which question containers we've already processed (via standard inputs)
+        const processedContainers = new Set();
+        fields.forEach(f => {
+            // Mark containers of already-extracted fields
+            const el = document.querySelector(f.selector);
+            if (el) {
+                const c = el.closest('[data-params]') || el.closest('[data-item-id]')
+                       || el.closest('[role="listitem"]');
+                if (c) processedContainers.add(c);
+            }
+        });
+
+        // Find all question containers in the form
+        const questionContainers = document.querySelectorAll(
+            '[data-params], [data-item-id], .freebirdFormviewerComponentsQuestionBaseRoot, .Qr7Oae'
+        );
+
+        questionContainers.forEach(container => {
+            if (processedContainers.has(container)) return;
+            // Also skip if a parent is already processed
+            let dominated = false;
+            processedContainers.forEach(pc => {
+                if (pc.contains(container) || container.contains(pc)) dominated = true;
+            });
+
+            // Check if this container has a standard input already in fields
+            const stdInputs = container.querySelectorAll('input:not([type="hidden"]), select, textarea');
+            if (stdInputs.length > 0) return;  // Already handled by standard extraction
+
+            // Get question label
+            const titleEl = container.querySelector(
+                '.freebirdFormviewerComponentsQuestionBaseTitle, '
+                + '.M7eMe, [role="heading"], .Qr7Oae > div > div > span'
+            );
+            const label = titleEl ? titleEl.textContent.trim() : '';
+            if (!label) return;  // No label = not a real question
+
+            // Check for required marker
+            const required = !!(
+                container.querySelector('[aria-label="Required question"]')
+                || container.querySelector('.freebirdFormviewerComponentsQuestionBaseRequiredAsterisk')
+                || container.textContent.includes('*')
+            );
+
+            // --- Radio group ---
+            const radioGroup = container.querySelector('[role="radiogroup"]');
+            if (radioGroup) {
+                const radios = radioGroup.querySelectorAll('[role="radio"], [data-value]');
+                const options = [];
+                radios.forEach(r => {
+                    // data-value is the primary source; fallback to aria-label or text
+                    const val = r.getAttribute('data-value')
+                             || r.getAttribute('aria-label')
+                             || r.textContent.trim();
+                    if (val) options.push(val);
+                });
+                // Build a selector for the radiogroup
+                let selector = '';
+                const dp = container.getAttribute('data-params');
+                if (dp) {
+                    const m = dp.match(/\["([^"]+)"/);
+                    if (m) selector = '[data-params*="' + m[1] + '"] [role="radiogroup"]';
+                }
+                const itemId = container.getAttribute('data-item-id');
+                if (!selector && itemId) {
+                    selector = '[data-item-id="' + itemId + '"] [role="radiogroup"]';
+                }
+                if (!selector) {
+                    // Fallback: nth-of-type among radiogroups
+                    const allRG = document.querySelectorAll('[role="radiogroup"]');
+                    for (let i = 0; i < allRG.length; i++) {
+                        if (allRG[i] === radioGroup) {
+                            selector = '[role="radiogroup"]:nth-of-type(' + (i+1) + ')';
+                            break;
+                        }
+                    }
+                }
+                if (!selector) selector = '[role="radiogroup"]';
+
+                fields.push({
+                    tag: 'div',
+                    type: 'gf_radio',
+                    label: label,
+                    selector: selector,
+                    required: required,
+                    value: '',
+                    iframe: null,
+                    options: options,
+                });
+                processedContainers.add(container);
+                return;
+            }
+
+            // --- Checkbox group ---
+            const checkboxes = container.querySelectorAll('[role="checkbox"]');
+            if (checkboxes.length > 0) {
+                const options = [];
+                checkboxes.forEach(cb => {
+                    const val = cb.getAttribute('data-answer-value')
+                             || cb.getAttribute('aria-label')
+                             || cb.textContent.trim();
+                    if (val) options.push(val);
+                });
+                let selector = '';
+                const dp = container.getAttribute('data-params');
+                if (dp) {
+                    const m = dp.match(/\["([^"]+)"/);
+                    if (m) selector = '[data-params*="' + m[1] + '"]';
+                }
+                const itemId = container.getAttribute('data-item-id');
+                if (!selector && itemId) {
+                    selector = '[data-item-id="' + itemId + '"]';
+                }
+                if (!selector) selector = '.Qr7Oae';
+
+                fields.push({
+                    tag: 'div',
+                    type: 'gf_checkbox',
+                    label: label,
+                    selector: selector,
+                    required: required,
+                    value: '',
+                    iframe: null,
+                    options: options,
+                });
+                processedContainers.add(container);
+                return;
+            }
+
+            // --- Custom dropdown (role="listbox") ---
+            const listbox = container.querySelector('[role="listbox"]');
+            if (listbox) {
+                const opts = listbox.querySelectorAll('[role="option"], [data-value]');
+                const options = [];
+                opts.forEach(o => {
+                    const val = o.getAttribute('data-value')
+                             || o.textContent.trim();
+                    if (val && val !== 'Choose') options.push(val);
+                });
+                let selector = '';
+                const dp = container.getAttribute('data-params');
+                if (dp) {
+                    const m = dp.match(/\["([^"]+)"/);
+                    if (m) selector = '[data-params*="' + m[1] + '"] [role="listbox"]';
+                }
+                const itemId = container.getAttribute('data-item-id');
+                if (!selector && itemId) {
+                    selector = '[data-item-id="' + itemId + '"] [role="listbox"]';
+                }
+                if (!selector) selector = '[role="listbox"]';
+
+                fields.push({
+                    tag: 'div',
+                    type: 'gf_dropdown',
+                    label: label,
+                    selector: selector,
+                    required: required,
+                    value: '',
+                    iframe: null,
+                    options: options,
+                });
+                processedContainers.add(container);
+                return;
+            }
+        });
+    }
+
     // Process iframes (try/catch for cross-origin)
     document.querySelectorAll('iframe').forEach((iframe, idx) => {
         try {
@@ -1052,7 +1420,7 @@ def _extract_form_context(page) -> tuple[str, list[dict]]:
         req_str = ", required" if required else ""
         line = f'{index}. [{ftype}{req_str}] "{label}"'
 
-        if ftype == "select" and options:
+        if ftype in ("select", "gf_radio", "gf_checkbox", "gf_dropdown") and options:
             line += f" (options: {', '.join(options)})"
         elif ftype == "file" and accept:
             line += f" (accepts: {accept})"
@@ -1091,7 +1459,7 @@ ACTIONS:
 - "type": ONLY if the EXACT value exists in APPLICANT DATA. Set value to the matching data.
 - "select": ONLY if the EXACT answer exists in APPLICANT DATA. Set value to the EXACT text of the matching option from the options list shown in parentheses.
 - "upload": For file uploads where the field is empty. Set value to the resume_path from applicant data.
-- "click": For checkboxes/radio buttons ONLY if the answer exists in APPLICANT DATA.
+- "click": For checkboxes/radio buttons (including gf_radio, gf_checkbox types) ONLY if the answer exists in APPLICANT DATA. Set value to the EXACT text of the option to select.
 - "skip": For submit buttons, fields that already have a correct value (shown as "current: ..."), or file uploads where a file is already uploaded.
 - "ask": For ANY field where you do NOT have a matching value in APPLICANT DATA. This includes dropdowns, text fields, checkboxes, radio buttons — anything where the answer is not explicitly provided.
 
@@ -1114,6 +1482,7 @@ For "ask" actions:
 - If the field is a radio button group, set value to a JSON array of all radio labels: ["Choice 1", "Choice 2", ...]
 
 For radio button groups (multiple fields with the same name attribute), only include ONE entry with action "ask" listing all choices. Skip the rest.
+For gf_radio, gf_checkbox, and gf_dropdown types (Google Forms custom widgets), treat them like radio/checkbox/select respectively. Use "click" if you know the answer, "ask" if you don't.
 Return ONLY a valid JSON array, no markdown fences, no explanation."""
 
 
@@ -1327,8 +1696,263 @@ def _validate_mapping(field_mapping: list[dict], applicant_data: dict, field_reg
     return validated
 
 
+def _handle_gf_widget(
+    page, action: str, value: str, label: str, field_index: int,
+    registry_entry: dict, filled_labels: list[str], session_id: str,
+) -> None:
+    """Handle Google Forms custom widgets (radio, checkbox, dropdown).
+
+    These are div-based ARIA widgets, not standard HTML form elements.
+    """
+    from pathlib import Path
+    reg_type = registry_entry["type"]  # gf_radio, gf_checkbox, gf_dropdown
+    selector = registry_entry["selector"]
+    options = registry_entry.get("options", [])
+
+    if action == "skip":
+        return
+
+    # For "ask" action, we need to get the user's response first
+    if action == "ask":
+        from bot.telegram_bot import ask_user, send_photo
+        from config import OUTPUT_BASE_DIR
+
+        # Check form_answers.json first
+        stored = _load_form_answers()
+        stored_value = None
+        label_lower = label.lower().strip()
+        for k, v in stored.items():
+            if k.lower().strip() == label_lower:
+                stored_value = v
+                break
+
+        if stored_value is not None:
+            logger.info("Found stored answer for GF widget '%s': %s", label, stored_value)
+            value = stored_value
+        else:
+            # Take screenshot and ask user
+            ss_path = str(Path(OUTPUT_BASE_DIR) / f"ask_field_{field_index}.png")
+            try:
+                page.screenshot(path=ss_path)
+                send_photo(ss_path, caption=(
+                    f"\u2753 <b>{label}</b>\n\n"
+                    + (f"Options: {', '.join(options)}\n\n" if options else "")
+                    + "Reply with your choice, or <code>takeover</code> to fill manually."
+                ))
+            except Exception:
+                pass
+
+            response = ask_user(
+                f"\u270f\ufe0f <b>{label}</b>\n"
+                + (f"Options: {', '.join(options)}\n" if options else "")
+                + "Reply with your answer:"
+            )
+
+            if response and response.strip().lower() == "takeover":
+                # Manual takeover
+                from bot.telegram_bot import send_notification, ask_yes_no
+                from apply.session_handoff import get_takeover_instructions
+                try:
+                    instructions = get_takeover_instructions()
+                    send_notification(
+                        f"\U0001f3ae <b>Manual takeover for:</b> {label}\n\n"
+                        f"{instructions}\n\n"
+                        "Fill this field in the browser, then tap <b>Done</b>."
+                    )
+                except Exception:
+                    from bot.telegram_bot import send_notification as _sn
+                    _sn(
+                        f"\U0001f3ae <b>Manual takeover for:</b> {label}\n\n"
+                        "Fill this field in the browser, then tap <b>Done</b>."
+                    )
+                ask_yes_no("Tap \u2705 <b>Done</b> when you\'ve filled this field.")
+                filled_labels.append(label)
+                return
+
+            if not response or not response.strip():
+                logger.warning("No response for GF widget '%s' — skipping", label)
+                return
+
+            value = response.strip()
+            # Save for future use
+            _save_form_answer(label, value)
+
+    elif action == "click" or action == "type" or action == "select":
+        # value is already set from LLM mapping
+        pass
+    else:
+        return
+
+    if not value:
+        return
+
+    # Now click the matching option in the Google Forms widget
+    if reg_type == "gf_radio":
+        _click_gf_radio(page, selector, value, label, field_index, filled_labels)
+    elif reg_type == "gf_checkbox":
+        _click_gf_checkboxes(page, selector, value, label, field_index, filled_labels)
+    elif reg_type == "gf_dropdown":
+        _select_gf_dropdown(page, selector, value, label, field_index, filled_labels)
+
+
+def _click_gf_radio(page, group_selector: str, value: str, label: str,
+                     field_index: int, filled_labels: list[str]) -> None:
+    """Click the matching radio option in a Google Forms radiogroup."""
+    target = value.strip().lower()
+
+    # Strategy 1: Find radio divs with data-value attribute
+    container = page.locator(group_selector).first
+    radios = container.locator('[role="radio"], [data-value]')
+    count = radios.count()
+
+    for i in range(count):
+        radio = radios.nth(i)
+        # Get the option text
+        opt_text = radio.evaluate("""el => {
+            return el.getAttribute('data-value')
+                || el.getAttribute('aria-label')
+                || el.textContent.trim();
+        }""")
+        if not opt_text:
+            continue
+
+        if opt_text.strip().lower() == target or target in opt_text.strip().lower():
+            try:
+                radio.click(timeout=5000)
+                logger.info("Clicked GF radio '%s' for '%s'", opt_text, label)
+                filled_labels.append(label)
+                return
+            except Exception:
+                # Try JS click
+                radio.evaluate("el => el.click()")
+                logger.info("JS-clicked GF radio '%s' for '%s'", opt_text, label)
+                filled_labels.append(label)
+                return
+
+    # Strategy 2: Fuzzy match — find closest option
+    best_match = None
+    best_score = 0
+    for i in range(count):
+        radio = radios.nth(i)
+        opt_text = radio.evaluate("""el => {
+            return el.getAttribute('data-value')
+                || el.getAttribute('aria-label')
+                || el.textContent.trim();
+        }""") or ""
+        opt_lower = opt_text.strip().lower()
+        # Simple overlap score
+        overlap = len(set(target.split()) & set(opt_lower.split()))
+        if overlap > best_score:
+            best_score = overlap
+            best_match = (i, opt_text)
+
+    if best_match and best_score > 0:
+        radio = radios.nth(best_match[0])
+        try:
+            radio.click(timeout=5000)
+        except Exception:
+            radio.evaluate("el => el.click()")
+        logger.info("Fuzzy-clicked GF radio '%s' for '%s' (target='%s')", best_match[1], label, value)
+        filled_labels.append(label)
+        return
+
+    logger.warning("No matching GF radio option for '%s' = '%s'", label, value)
+
+
+def _click_gf_checkboxes(page, container_selector: str, value: str, label: str,
+                          field_index: int, filled_labels: list[str]) -> None:
+    """Click matching checkbox options in a Google Forms checkbox group.
+
+    value can be a single string or a JSON array string like '["A", "B"]'.
+    """
+    import json as _json
+
+    # Parse value — could be JSON array or single value
+    try:
+        targets = _json.loads(value)
+        if isinstance(targets, str):
+            targets = [targets]
+    except (_json.JSONDecodeError, TypeError):
+        targets = [value]
+
+    targets_lower = [t.strip().lower() for t in targets]
+
+    container = page.locator(container_selector).first
+    checkboxes = container.locator('[role="checkbox"]')
+    count = checkboxes.count()
+
+    clicked_any = False
+    for i in range(count):
+        cb = checkboxes.nth(i)
+        cb_text = cb.evaluate("""el => {
+            return el.getAttribute('data-answer-value')
+                || el.getAttribute('aria-label')
+                || el.textContent.trim();
+        }""") or ""
+        cb_lower = cb_text.strip().lower()
+
+        for t in targets_lower:
+            if cb_lower == t or t in cb_lower or cb_lower in t:
+                try:
+                    cb.click(timeout=5000)
+                except Exception:
+                    cb.evaluate("el => el.click()")
+                logger.info("Clicked GF checkbox '%s' for '%s'", cb_text, label)
+                clicked_any = True
+                break
+
+    if clicked_any:
+        filled_labels.append(label)
+    else:
+        logger.warning("No matching GF checkbox options for '%s' = '%s'", label, value)
+
+
+def _select_gf_dropdown(page, listbox_selector: str, value: str, label: str,
+                         field_index: int, filled_labels: list[str]) -> None:
+    """Select an option from a Google Forms custom dropdown (role=listbox)."""
+    target = value.strip().lower()
+
+    # Google Forms dropdowns need to be opened first (click the dropdown trigger)
+    container = page.locator(listbox_selector).first
+
+    # Try clicking the dropdown to open it
+    try:
+        container.click(timeout=3000)
+        page.wait_for_timeout(500)  # Wait for dropdown animation
+    except Exception:
+        pass
+
+    # Now find and click the matching option
+    options = page.locator('[role="option"], [role="listbox"] [data-value]')
+    count = options.count()
+
+    for i in range(count):
+        opt = options.nth(i)
+        if not opt.is_visible():
+            continue
+        opt_text = opt.evaluate("""el => {
+            return el.getAttribute('data-value')
+                || el.textContent.trim();
+        }""") or ""
+        if opt_text.strip().lower() == target or target in opt_text.strip().lower():
+            try:
+                opt.click(timeout=5000)
+                logger.info("Selected GF dropdown '%s' for '%s'", opt_text, label)
+                filled_labels.append(label)
+                return
+            except Exception:
+                opt.evaluate("el => el.click()")
+                logger.info("JS-selected GF dropdown '%s' for '%s'", opt_text, label)
+                filled_labels.append(label)
+                return
+
+    logger.warning("No matching GF dropdown option for '%s' = '%s'", label, value)
+
+
+
 def _fill_mapped_fields(
-    page, field_mapping: list[dict], field_registry: list[dict]
+    page, field_mapping: list[dict], field_registry: list[dict],
+    session_id: str = ""
 ) -> list[str]:
     """Execute the field mapping by looking up real selectors from field_registry.
 
@@ -1411,6 +2035,18 @@ def _fill_mapped_fields(
                 except Exception:
                     logger.warning("Skipping disabled field '%s'", label)
                     continue
+
+            # --- Google Forms custom widget handling ---
+            reg_type = registry_entry.get("type", "text")
+            if reg_type.startswith("gf_"):
+                try:
+                    _handle_gf_widget(
+                        page, action, value, label, field_index,
+                        registry_entry, filled_labels, session_id,
+                    )
+                except Exception as gf_exc:
+                    logger.warning("Google Forms widget fill failed for '%s': %s", label, gf_exc)
+                continue  # gf_ fields are fully handled — skip standard logic
 
             if action == "type":
                 el.wait_for(timeout=5000)
@@ -1617,7 +2253,9 @@ def _fill_mapped_fields(
                             question = (
                                 f"\U0001f4cb <b>Field:</b> {label}\n"
                                 f"This field has {len(options_list)} options (see screenshot).\n\n"
-                                "Reply with the EXACT option text to select."
+                                "Reply with the EXACT option text to select.\n\n"
+                                "\u2022 Type <code>skip</code> to skip this field\n"
+                                "\u2022 Type <code>takeover</code> to fill manually in browser"
                             )
                             response = ask_user(question, screenshot_path=ss_path)
                         except Exception:
@@ -1625,7 +2263,9 @@ def _fill_mapped_fields(
                             question = (
                                 f"\U0001f4cb <b>Field:</b> {label}\n\n"
                                 f"<b>Options:</b>\n{opts_text}\n\n"
-                                "Reply with the EXACT option text to select."
+                                "Reply with the EXACT option text to select.\n\n"
+                                "\u2022 Type <code>skip</code> to skip this field\n"
+                                "\u2022 Type <code>takeover</code> to fill manually in browser"
                             )
                             response = ask_user(question)
                     else:
@@ -1633,18 +2273,64 @@ def _fill_mapped_fields(
                         question = (
                             f"\U0001f4cb <b>Field:</b> {label}\n\n"
                             f"<b>Options:</b>\n{opts_text}\n\n"
-                            "Reply with the EXACT option text to select."
+                            "Reply with the EXACT option text to select.\n\n"
+                                "\u2022 Type <code>skip</code> to skip this field\n"
+                                "\u2022 Type <code>takeover</code> to fill manually in browser"
                         )
                         response = ask_user(question)
                 else:
-                    # Free text field
-                    question = (
-                        f"\u270f\ufe0f <b>Field:</b> {label}\n\n"
-                        "Reply with the value to fill in."
-                    )
-                    response = ask_user(question)
+                    # Free text field — always include screenshot for context
+                    try:
+                        ss_path = str(Path(OUTPUT_BASE_DIR) / f"ask_field_{field_index}.png")
+                        page.screenshot(path=ss_path)
+                        question = (
+                            f"\u270f\ufe0f <b>Field:</b> {label}\n\n"
+                            "Reply with the value to fill in.\n\n"
+                            "\u2022 Type <code>skip</code> to skip this field\n"
+                            "\u2022 Type <code>takeover</code> to fill manually in browser"
+                        )
+                        response = ask_user(question, screenshot_path=ss_path)
+                    except Exception:
+                        question = (
+                            f"\u270f\ufe0f <b>Field:</b> {label}\n\n"
+                            "Reply with the value to fill in.\n\n"
+                            "\u2022 Type <code>skip</code> to skip this field\n"
+                            "\u2022 Type <code>takeover</code> to fill manually in browser"
+                        )
+                        response = ask_user(question)
 
                 if response and response != "__timeout__":
+                    # --- Handle skip: don't fill, don't save to JSON ---
+                    if response.strip().lower() == "skip":
+                        logger.info("User skipped field '%s' (index=%d)", label, field_index)
+                        _asked_fields.add(ask_key)
+                        continue
+
+                    # --- Handle takeover: user fills manually in browser ---
+                    if response.strip().lower() == "takeover":
+                        logger.info("User requested takeover for field '%s' (index=%d)", label, field_index)
+                        try:
+                            from bot.telegram_bot import send_notification as _sn_takeover
+                            from apply.session_handoff import get_takeover_instructions
+                            cdp_instructions = get_takeover_instructions(session_id)
+                            _sn_takeover(
+                                f"\U0001f3ae <b>Manual takeover for:</b> {label}\n\n"
+                                f"<pre>{cdp_instructions}</pre>\n\n"
+                                "Fill this field in the browser, then tap <b>Done</b>."
+                            )
+                        except Exception as _cdp_err:
+                            from bot.telegram_bot import send_notification as _sn_takeover2
+                            _sn_takeover2(
+                                f"\U0001f3ae <b>Manual takeover for:</b> {label}\n\n"
+                                "Fill this field in the browser, then tap <b>Done</b>."
+                            )
+                        from bot.telegram_bot import ask_yes_no
+                        ask_yes_no("Tap \u2705 <b>Done</b> when you\'ve filled this field.")
+                        logger.info("User completed manual takeover for field '%s'", label)
+                        _asked_fields.add(ask_key)
+                        filled_labels.append(label)
+                        continue
+
                     # Belt-and-suspenders: check actual tagName
                     if reg_type not in ("select",) and el.is_visible(timeout=1000):
                         try:
@@ -2125,7 +2811,9 @@ def _handle_blocker(blocker: dict, page, session_id: str) -> str:
                 question = (
                     f"📋 <b>Field:</b> {field_label}\n\n"
                     f"<b>Options ({len(select_options)}):</b>\n{opts_text}\n\n"
-                    "Reply with the EXACT option text to select."
+                    "Reply with the EXACT option text to select.\n\n"
+                                "\u2022 Type <code>skip</code> to skip this field\n"
+                                "\u2022 Type <code>takeover</code> to fill manually in browser"
                 )
                 response = ask_user(question, screenshot_path=ss_path if ss_path else None)
             else:
@@ -2133,7 +2821,9 @@ def _handle_blocker(blocker: dict, page, session_id: str) -> str:
                 question = (
                     f"📋 <b>Field:</b> {field_label}\n\n"
                     f"<b>Options:</b>\n{opts_text}\n\n"
-                    "Reply with the EXACT option text to select."
+                    "Reply with the EXACT option text to select.\n\n"
+                                "\u2022 Type <code>skip</code> to skip this field\n"
+                                "\u2022 Type <code>takeover</code> to fill manually in browser"
                 )
                 response = ask_user(question, screenshot_path=screenshot_path if screenshot_path else None)
         else:
@@ -2141,10 +2831,16 @@ def _handle_blocker(blocker: dict, page, session_id: str) -> str:
             if field_label:
                 question += (
                     f"\n\n<b>Field:</b> {field_label}\n"
-                    "Reply with the value to fill, or type <code>takeover</code> for manual control."
+                    "Reply with the value to fill.\n\n"
+                    "\u2022 Type <code>skip</code> to skip this field\n"
+                    "\u2022 Type <code>takeover</code> to fill manually in browser"
                 )
             else:
-                question += "\n\nReply with the value, or type <code>takeover</code> for manual control."
+                question += (
+                    "\n\nReply with the value to fill.\n\n"
+                    "\u2022 Type <code>skip</code> to skip this field\n"
+                    "\u2022 Type <code>takeover</code> to fill manually in browser"
+                )
 
             response = ask_user(question, screenshot_path=screenshot_path if screenshot_path else None)
 
@@ -2152,7 +2848,12 @@ def _handle_blocker(blocker: dict, page, session_id: str) -> str:
             logger.warning("Telegram response timed out for blocker: %s", details)
             return _handle_complex_blocker(blocker, session_id)
 
-        if response.lower() == "takeover":
+        if response.strip().lower() == "skip":
+            logger.info("User skipped blocker field '%s'", field_label or "unknown")
+            _asked_fields.add(blocker_ask_key)
+            return "resolved"
+
+        if response.strip().lower() == "takeover":
             # Fall through to complex handler
             return _handle_complex_blocker(blocker, session_id)
 
@@ -2470,7 +3171,7 @@ def fill_form(url: str, documents: dict, submit: bool = True) -> dict:
                 field_mapping = _validate_mapping(field_mapping, applicant_data, field_registry)
 
                 # 7. Fill the mapped fields (includes "ask" action for unknown fields)
-                newly_filled = _fill_mapped_fields(page, field_mapping, field_registry)
+                newly_filled = _fill_mapped_fields(page, field_mapping, field_registry, session_id=session_id)
                 filled_fields.extend(newly_filled)
 
             # 8. Small delay for any client-side validation to trigger
@@ -2612,7 +3313,8 @@ def fill_form(url: str, documents: dict, submit: bool = True) -> dict:
                         if retry_mapping:
                             retry_mapping = _validate_mapping(retry_mapping, applicant_data, field_registry2)
                             retry_filled = _fill_mapped_fields(
-                                page, retry_mapping, field_registry2
+                                page, retry_mapping, field_registry2,
+                                session_id=session_id
                             )
                             filled_fields.extend(retry_filled)
                             logger.info("Retry filled %d additional fields", len(retry_filled))
@@ -2726,7 +3428,9 @@ def fill_form(url: str, documents: dict, submit: bool = True) -> dict:
             # with "Apply Now" buttons on JD pages. Use Submit-specific selectors only.
             submit_btn = page.locator(
                 "button:has-text('Submit'), button:has-text('Submit Application'), "
-                "input[type='submit'], button[type='submit']"
+                "input[type='submit'], button[type='submit'], "
+                "div[role='button']:has-text('Submit'), "
+                "[role='button']:has-text('Submit')"
             ).first
 
             try:
@@ -2797,7 +3501,57 @@ def fill_form(url: str, documents: dict, submit: bool = True) -> dict:
                 pass  # No submit button visible
 
             # No next or submit button found — might be done or stuck
-            logger.info("No navigation buttons found on page %d", page_num + 1)
+            # Instead of silently closing, offer the user manual control
+            logger.warning("No navigation buttons found on page %d — requesting manual takeover", page_num + 1)
+            try:
+                from bot.telegram_bot import send_photo, request_interrupt, send_notification
+                from apply.session_handoff import get_takeover_instructions
+                from config import OUTPUT_BASE_DIR
+
+                # Take screenshot so user can see current state
+                no_nav_ss = str(
+                    Path(OUTPUT_BASE_DIR) / f"no_nav_page_{page_num + 1}_{int(time.time())}.png"
+                )
+                page.screenshot(path=no_nav_ss)
+                send_photo(
+                    no_nav_ss,
+                    caption=(
+                        "\u26a0\ufe0f <b>No Submit/Next button found</b>\n\n"
+                        "The form may need manual submission or there may be "
+                        "an issue. Take manual control to review and submit."
+                    ),
+                )
+
+                # Send CDP takeover instructions
+                try:
+                    cdp_instructions = get_takeover_instructions(session_id)
+                    send_notification(f"<pre>{cdp_instructions}</pre>")
+                except Exception as _cdp_err:
+                    logger.warning("Failed to get CDP instructions: %s", _cdp_err)
+
+                # Wait for user to finish
+                response = request_interrupt(
+                    interrupt_type="no_nav_handoff",
+                    message=(
+                        "\u26a0\ufe0f <b>Manual control active.</b>\n\n"
+                        "Submit the form or fix any issues in the browser, "
+                        "then tap <b>Done</b>."
+                    ),
+                    buttons=[
+                        {"text": "\u2705 Done", "callback_data": "blocker_done"},
+                    ],
+                    timeout=600,
+                )
+                if response is not None:
+                    status = "handed_off"
+                    notes = f"Handed off to user (no nav buttons on page {page_num + 1}). User confirmed done."
+                else:
+                    status = "partially_filled"
+                    notes = f"Handed off to user (no nav buttons on page {page_num + 1}). Timed out waiting for confirmation."
+            except Exception as handoff_err:
+                logger.error("Failed to request handoff: %s", handoff_err)
+                status = "partially_filled"
+                notes = f"No navigation buttons found on page {page_num + 1}. Handoff failed: {handoff_err}"
             break
         if page_num >= max_pages:
             status = "partially_filled"  # hit max_pages
@@ -2812,9 +3566,64 @@ def fill_form(url: str, documents: dict, submit: bool = True) -> dict:
 
     except Exception as exc:
         logger.error("Form filling failed: %s", exc, exc_info=True)
-        status = "failed"
+        # Notify user via Telegram and offer manual takeover before closing
+        try:
+            from bot.telegram_bot import send_notification, send_photo, request_interrupt
+            from apply.session_handoff import get_takeover_instructions
+            from config import OUTPUT_BASE_DIR
+
+            # Try to capture a screenshot of the error state
+            error_ss = None
+            try:
+                error_ss = str(
+                    Path(OUTPUT_BASE_DIR) / f"error_state_{int(time.time())}.png"
+                )
+                page.screenshot(path=error_ss)
+            except Exception:
+                error_ss = None
+
+            error_msg = str(exc)[:200] if str(exc) else "Unknown error"
+            caption = (
+                "\u274c <b>Form filling encountered an error</b>\n\n"
+                f"<code>{error_msg}</code>\n\n"
+                "You can take manual control to finish, or let it close."
+            )
+            if error_ss:
+                send_photo(error_ss, caption=caption)
+            else:
+                send_notification(caption)
+
+            # Send CDP takeover instructions
+            try:
+                cdp_instructions = get_takeover_instructions(session_id)
+                send_notification(f"<pre>{cdp_instructions}</pre>")
+            except Exception:
+                pass
+
+            response = request_interrupt(
+                interrupt_type="error_handoff",
+                message=(
+                    "\u26a0\ufe0f <b>Take manual control?</b>\n\n"
+                    "Fix the issue in the browser and tap <b>Done</b>, "
+                    "or tap <b>Close</b> to end the session."
+                ),
+                buttons=[
+                    {"text": "\u2705 Done", "callback_data": "blocker_done"},
+                    {"text": "\u274c Close", "callback_data": "blocker_close"},
+                ],
+                timeout=600,
+            )
+            if response and response != "blocker_close":
+                status = "handed_off"
+                notes = f"Error occurred ({error_msg}), user took manual control."
+            else:
+                status = "failed"
+                notes = f"Error: {exc}"
+        except Exception as notify_err:
+            logger.warning("Could not notify user about error: %s", notify_err)
+            status = "failed"
+            notes = f"Error: {exc}"
         final_url = url
-        notes = f"Error: {exc}"
 
     finally:
         # Cleanup
