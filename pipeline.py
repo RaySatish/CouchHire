@@ -1658,10 +1658,10 @@ def route_after_cover_letter(state: PipelineState) -> str:
 # ---------------------------------------------------------------------------
 
 def build_graph() -> StateGraph:
-    """Build the LangGraph pipeline with 18 nodes and 5 conditional edges."""
+    """Build the LangGraph pipeline with 19 nodes and 7 conditional edges."""
     graph = StateGraph(PipelineState)
 
-    # --- Add all 18 nodes ---
+    # --- Add all 19 nodes ---
     graph.add_node("scrape_jd", node_scrape_jd)
     graph.add_node("parse_jd", node_parse_jd)
     graph.add_node("cv_rag", node_cv_rag)

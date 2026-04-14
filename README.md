@@ -278,7 +278,7 @@ couchhire/
 ├── tests/                   # Test suite (290 tests)
 │   ├── conftest.py              # Shared fixtures
 │   └── test_*.py                # Unit + integration tests
-├── pipeline.py              # LangGraph orchestrator (19 nodes, 7 edges)
+├── pipeline.py              # LangGraph orchestrator (19 nodes, 7 conditional edges)
 ├── generate_resume.py       # Standalone resume generator
 ├── config.py                # Environment validation
 ├── entrypoint.sh            # Docker entrypoint script
