@@ -366,7 +366,7 @@ CouchHire uses [google_workspace_mcp](https://github.com/taylorwilsdon/google_wo
 
 > The MCP server runs via `uvx` (system-level), separate from your project venv. Start it in a dedicated terminal before running the pipeline.
 
-### Job Search (JobSpy)
+### Job Search ([JobSpy](https://github.com/speedyapply/JobSpy))
 
 No API keys required. JobSpy scrapes job boards directly. Each board is scraped individually so a failure on one doesn't discard results from the others.
 
