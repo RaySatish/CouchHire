@@ -16,6 +16,12 @@
 
 CouchHire is a fully agentic job application pipeline. Paste a job description, approve via Telegram, and it handles the rest — tailored resume, cover letter, email draft, and ATS form filling. A self-improving NLP match scorer learns from your outcomes over time.
 
+
+
+https://github.com/user-attachments/assets/659ac9b5-969c-4eb6-ae27-185e1960483e
+
+
+
 ---
 
 ## Table of Contents
