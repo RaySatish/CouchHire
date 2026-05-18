@@ -126,6 +126,31 @@ def _clean_stale_profile_lock(profile_dir: Path) -> None:
         logger.debug("Cannot check pid %d — leaving lock in place", pid)
 
 
+def _nuke_corrupted_profile(profile_dir: Path) -> None:
+    """Remove a corrupted browser profile, preserving nothing.
+
+    Called when the browser crashes immediately after launch — a strong
+    signal that the profile's SQLite databases or cache are corrupted
+    beyond repair.  A fresh profile is created in its place.
+    """
+    import shutil
+
+    if not profile_dir.exists():
+        return
+
+    logger.warning(
+        "Nuking corrupted browser profile at %s", profile_dir
+    )
+    try:
+        shutil.rmtree(profile_dir)
+    except OSError as exc:
+        logger.error("Failed to remove corrupted profile: %s", exc)
+        return
+
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Fresh browser profile created at %s", profile_dir)
+
+
 def _kill_existing_chromium_on_port(port: int) -> None:
     """Kill any process currently listening on the CDP port.
 
@@ -310,9 +335,22 @@ def launch_browser(session_id: str = "default", headless: bool = True) -> dict:
     try:
         ws_url = _wait_for_cdp(port)
     except RuntimeError:
-        # CDP never came up — kill the process and re-raise
+        # CDP never came up — browser likely crashed on startup.
         process.kill()
         process.wait(timeout=5)
+
+        # If process exited almost immediately, the profile is probably
+        # corrupted.  Nuke it and retry exactly once.
+        if not hasattr(launch_browser, "_retried"):
+            launch_browser._retried = True  # type: ignore[attr-defined]
+            logger.warning(
+                "Browser crashed on startup — nuking profile and retrying"
+            )
+            _nuke_corrupted_profile(BROWSER_PROFILE_DIR)
+            try:
+                return launch_browser(session_id, headless)
+            finally:
+                del launch_browser._retried  # type: ignore[attr-defined]
         raise
 
     cdp_url = f"http://127.0.0.1:{port}"
