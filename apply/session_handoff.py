@@ -13,8 +13,10 @@ Public API:
 
 import json
 import logging
+import os
 import platform
 import shutil
+import signal
 import subprocess
 import time
 import urllib.error
@@ -43,6 +45,110 @@ _TERMINATE_TIMEOUT: float = 5.0     # seconds to wait after terminate() before k
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _clean_stale_profile_lock(profile_dir: Path) -> None:
+    """Remove stale SingletonLock if the owning process is dead or zombie.
+
+    Chromium writes a symlink at <profile>/SingletonLock pointing to
+    '<hostname>-<pid>'.  If that process is gone (or is a zombie whose
+    parent never reaped it), the lock is stale and will prevent any new
+    Chromium from using the profile.
+    """
+    lock = profile_dir / "SingletonLock"
+    if not lock.is_symlink() and not lock.exists():
+        return
+
+    try:
+        target = os.readlink(lock)
+    except OSError:
+        return
+
+    # target looks like "hostname-12345"
+    parts = target.rsplit("-", 1)
+    if len(parts) != 2:
+        return
+
+    try:
+        pid = int(parts[1])
+    except ValueError:
+        return
+
+    # Check if process is alive and NOT a zombie
+    try:
+        os.kill(pid, 0)  # signal 0 = existence check
+        # Process exists — check if zombie
+        try:
+            import psutil
+            proc = psutil.Process(pid)
+            if proc.status() == psutil.STATUS_ZOMBIE:
+                logger.warning(
+                    "SingletonLock held by zombie pid %d — removing stale lock", pid
+                )
+                lock.unlink(missing_ok=True)
+                # Also remove SingletonCookie and SingletonSocket
+                (profile_dir / "SingletonCookie").unlink(missing_ok=True)
+                for p in profile_dir.glob("SingletonSocket*"):
+                    p.unlink(missing_ok=True)
+                return
+        except ImportError:
+            # psutil not available — fall back to /proc or ps
+            try:
+                result = subprocess.run(
+                    ["ps", "-o", "stat=", "-p", str(pid)],
+                    capture_output=True, text=True, timeout=3,
+                )
+                stat = result.stdout.strip()
+                if stat.startswith("Z"):
+                    logger.warning(
+                        "SingletonLock held by zombie pid %d (stat=%s) — removing",
+                        pid, stat,
+                    )
+                    lock.unlink(missing_ok=True)
+                    (profile_dir / "SingletonCookie").unlink(missing_ok=True)
+                    for p in profile_dir.glob("SingletonSocket*"):
+                        p.unlink(missing_ok=True)
+                    return
+            except (subprocess.SubprocessError, OSError):
+                pass
+        # Process is alive and not zombie — lock is valid
+        logger.debug("SingletonLock held by live pid %d — lock is valid", pid)
+    except ProcessLookupError:
+        # Process doesn't exist at all
+        logger.warning(
+            "SingletonLock held by dead pid %d — removing stale lock", pid
+        )
+        lock.unlink(missing_ok=True)
+        (profile_dir / "SingletonCookie").unlink(missing_ok=True)
+        for p in profile_dir.glob("SingletonSocket*"):
+            p.unlink(missing_ok=True)
+    except PermissionError:
+        logger.debug("Cannot check pid %d — leaving lock in place", pid)
+
+
+def _kill_existing_chromium_on_port(port: int) -> None:
+    """Kill any process currently listening on the CDP port.
+
+    Prevents 'address already in use' when a previous Chromium didn't
+    shut down cleanly.
+    """
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = result.stdout.strip().split()
+        for pid_str in pids:
+            try:
+                pid = int(pid_str)
+                os.kill(pid, signal.SIGTERM)
+                logger.info("Killed stale process %d on port %d", pid, port)
+                time.sleep(0.5)
+            except (ValueError, ProcessLookupError, PermissionError):
+                pass
+    except (subprocess.SubprocessError, OSError):
+        pass
+
 
 def _find_chromium_executable() -> str:
     """Locate a Chromium/Chrome executable. Returns the path string.
@@ -99,7 +205,7 @@ def _wait_for_cdp(port: int, timeout: float = _CDP_STARTUP_TIMEOUT) -> str:
     Returns the webSocketDebuggerUrl from the response.
     Raises RuntimeError if the endpoint doesn't respond within timeout.
     """
-    url = f"http://localhost:{port}/json/version"
+    url = f"http://127.0.0.1:{port}/json/version"
     deadline = time.monotonic() + timeout
 
     while time.monotonic() < deadline:
@@ -115,7 +221,7 @@ def _wait_for_cdp(port: int, timeout: float = _CDP_STARTUP_TIMEOUT) -> str:
         time.sleep(_CDP_POLL_INTERVAL)
 
     raise RuntimeError(
-        f"CDP endpoint at localhost:{port} did not respond within {timeout}s. "
+        f"CDP endpoint at 127.0.0.1:{port} did not respond within {timeout}s. "
         f"Check if port {port} is already in use: lsof -i :{port}"
     )
 
@@ -158,6 +264,11 @@ def launch_browser(session_id: str = "default", headless: bool = True) -> dict:
         _SESSIONS.pop(session_id, None)
 
     port = CDP_PORT
+
+    # Clean up stale locks and processes from previous runs
+    _kill_existing_chromium_on_port(port)
+    _clean_stale_profile_lock(BROWSER_PROFILE_DIR)
+
     executable = _find_chromium_executable()
     # Use persistent profile dir so cookies/logins survive across runs.
     # Create it if it doesn't exist yet.
@@ -168,6 +279,7 @@ def launch_browser(session_id: str = "default", headless: bool = True) -> dict:
     cmd = [
         executable,
         f"--remote-debugging-port={port}",
+        "--remote-debugging-address=127.0.0.1",
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
         "--no-default-browser-check",
@@ -203,7 +315,7 @@ def launch_browser(session_id: str = "default", headless: bool = True) -> dict:
         process.wait(timeout=5)
         raise
 
-    cdp_url = f"http://localhost:{port}"
+    cdp_url = f"http://127.0.0.1:{port}"
 
     # Store session
     _SESSIONS[session_id] = {
@@ -244,7 +356,7 @@ def get_cdp_url(session_id: str = "default") -> str:
             f"(exit code={process.returncode}). Relaunch with launch_browser()."
         )
 
-    return f"http://localhost:{session['cdp_port']}"
+    return f"http://127.0.0.1:{session['cdp_port']}"
 
 
 def get_takeover_instructions(session_id: str = "default") -> str:

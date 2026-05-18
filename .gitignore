@@ -43,3 +43,6 @@ nlp/models/
 
 # supabase cache
 supabase/.temp/
+
+*.bak
+answer.txt

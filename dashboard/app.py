@@ -364,27 +364,36 @@ with tab_tracker:
                         elif new_outcome == "— (none)":
                             st.warning("Select an outcome first")
 
-                # JD and resume in a sub-expander
-                if jd_text:
-                    with st.expander("📄 Job Description", expanded=False):
-                        st.text_area(
-                            "jd",
-                            value=jd_text,
-                            height=200,
-                            disabled=True,
-                            key=f"jd_{app_id}",
-                            label_visibility="collapsed",
-                        )
-                if resume_content:
-                    with st.expander("📝 Resume Content", expanded=False):
-                        st.text_area(
-                            "resume",
-                            value=resume_content,
-                            height=200,
-                            disabled=True,
-                            key=f"resume_{app_id}",
-                            label_visibility="collapsed",
-                        )
+                # JD and resume in tabs (cannot nest expanders inside expanders)
+                if jd_text or resume_content:
+                    tab_labels = []
+                    if jd_text:
+                        tab_labels.append("📄 Job Description")
+                    if resume_content:
+                        tab_labels.append("📝 Resume Content")
+                    sub_tabs = st.tabs(tab_labels)
+                    idx = 0
+                    if jd_text:
+                        with sub_tabs[idx]:
+                            st.text_area(
+                                "jd",
+                                value=jd_text,
+                                height=200,
+                                disabled=True,
+                                key=f"jd_{app_id}",
+                                label_visibility="collapsed",
+                            )
+                        idx += 1
+                    if resume_content:
+                        with sub_tabs[idx]:
+                            st.text_area(
+                                "resume",
+                                value=resume_content,
+                                height=200,
+                                disabled=True,
+                                key=f"resume_{app_id}",
+                                label_visibility="collapsed",
+                            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

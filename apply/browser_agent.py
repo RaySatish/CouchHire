@@ -3142,7 +3142,10 @@ def fill_form(url: str, documents: dict, submit: bool = True) -> dict:
                     "button:has-text('Next'), button:has-text('Continue'), "
                     "button:has-text('Save and Continue'), "
                     "button:has-text('Save & Continue'), "
-                    "button:has-text('Proceed')"
+                    "button:has-text('Proceed'), "
+                    "[role='button']:has-text('Next'), "
+                    "[role='button']:has-text('Continue'), "
+                    "[role='button']:has-text('Proceed')"
                 ).first
                 try:
                     if _stuck_next.is_visible(timeout=2000):
@@ -3385,6 +3388,8 @@ def fill_form(url: str, documents: dict, submit: bool = True) -> dict:
 
             # 10. Look for a "Next" or "Continue" button
             # Includes "Save and Continue" / "Save & Continue" for Phenom ATS
+            # Google Forms uses <div role="button"> / <span role="button">, not <button>.
+            # Include [role='button'] selectors to handle Google Forms and similar.
             next_btn = page.locator(
                 "button:has-text('Next'), button:has-text('Continue'), "
                 "button:has-text('Save and Continue'), "
@@ -3392,7 +3397,12 @@ def fill_form(url: str, documents: dict, submit: bool = True) -> dict:
                 "button:has-text('Save and Next'), "
                 "button:has-text('Proceed'), "
                 "input[type='submit']:has-text('Next'), "
-                "a:has-text('Next'), a:has-text('Continue')"
+                "a:has-text('Next'), a:has-text('Continue'), "
+                "[role='button']:has-text('Next'), "
+                "[role='button']:has-text('Continue'), "
+                "[role='button']:has-text('Proceed'), "
+                "span:has-text('Next') >> xpath=ancestor::div[@role='button'], "
+                "span:has-text('Continue') >> xpath=ancestor::div[@role='button']"
             ).first
 
             try:

@@ -39,9 +39,18 @@ def _get_embedder():
     return _embedder
 
 
-def _get_collection():
-    """Lazily initialise the ChromaDB client and return the master_cv collection."""
+def _get_collection(*, force_refresh: bool = False):
+    """Lazily initialise the ChromaDB client and return the master_cv collection.
+
+    If force_refresh is True, discard any cached handle and reconnect.
+    This handles the case where embed_cv.py was re-run while the process
+    (e.g. Telegram bot) was still running, which invalidates the old
+    collection UUID.
+    """
     global _chroma_collection
+    if force_refresh:
+        _chroma_collection = None
+
     if _chroma_collection is None:
         import chromadb
 
@@ -108,8 +117,19 @@ def retrieve_cv_sections(requirements: dict, top_k: int = 4) -> list[str]:
 
     # Fetch more results than needed so we can filter out template/instructions
     # and still return up to top_k CV sections.
-    collection = _get_collection()
-    total_docs = collection.count()
+    # Retry once on NotFoundError — handles stale cached collection after re-embed.
+    try:
+        collection = _get_collection()
+        total_docs = collection.count()
+    except Exception as exc:
+        if "NotFoundError" in type(exc).__name__ or "does not exist" in str(exc):
+            logger.warning(
+                "Stale ChromaDB collection handle — reconnecting after re-embed"
+            )
+            collection = _get_collection(force_refresh=True)
+            total_docs = collection.count()
+        else:
+            raise
     n_results = min(total_docs, top_k + len(_EXCLUDED_TYPES) + 2)
 
     results = collection.query(
